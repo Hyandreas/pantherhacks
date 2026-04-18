@@ -151,6 +151,9 @@ button {
 }
 
 .status-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
   border-radius: 999px;
   border: 1px solid var(--line);
   color: var(--muted);
@@ -162,6 +165,26 @@ button {
   color: #082019;
   background: var(--mint);
   border-color: transparent;
+}
+
+.volume-dot {
+  position: relative;
+  display: inline-flex;
+  align-items: end;
+  width: 12px;
+  height: 12px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: rgba(8, 32, 25, 0.28);
+  box-shadow: inset 0 0 0 1px rgba(8, 32, 25, 0.26);
+}
+
+.volume-dot span {
+  width: 100%;
+  min-height: 2px;
+  border-radius: inherit;
+  background: #0b6b4b;
+  transition: height 80ms linear;
 }
 
 .bridge-device {
@@ -443,6 +466,45 @@ button.ghost {
 .toggle.active {
   background: rgba(152, 255, 216, 0.12);
   border-color: rgba(152, 255, 216, 0.3);
+}
+
+.demo-checkbox {
+  display: flex;
+  gap: 12px;
+  align-items: flex-start;
+  margin-top: 16px;
+  padding: 14px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 18px;
+  background: rgba(255, 255, 255, 0.04);
+  cursor: pointer;
+}
+
+.demo-checkbox input {
+  width: 18px;
+  height: 18px;
+  margin: 2px 0 0;
+  accent-color: var(--mint);
+}
+
+.demo-checkbox span {
+  display: grid;
+  gap: 4px;
+}
+
+.demo-checkbox small {
+  color: var(--muted);
+  line-height: 1.4;
+}
+
+.demo-options {
+  display: grid;
+  gap: 12px;
+  margin-top: 12px;
+}
+
+.run-demo-button {
+  width: 100%;
 }
 
 .scenario-list {

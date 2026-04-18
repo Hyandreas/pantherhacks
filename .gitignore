@@ -31,3 +31,6 @@ npm-debug.log*
 
 # Claude Code
 CLAUDE.md
+
+# Local generated summaries
+current_codbase_summary.md

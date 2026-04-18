@@ -37,15 +37,19 @@ function App() {
   const [listening, setListening] = useState(false);
   const [plainLanguageEnabled, setPlainLanguageEnabled] = useState(true);
   const [focusEnabled, setFocusEnabled] = useState(false);
+  const [showDemoOptions, setShowDemoOptions] = useState(false);
   const [saved, setSaved] = useState(false);
   const [statusMessage, setStatusMessage] = useState(
     "Consent-first bridge mode is ready. Start live captions or run a scenario.",
   );
   const [selectedCaptionId, setSelectedCaptionId] = useState<string | null>(null);
   const [flashCritical, setFlashCritical] = useState(false);
+  const [micLevel, setMicLevel] = useState(0);
   const demoControlsRef = useRef<DemoAdapterControls | null>(null);
-  const transcriptCounter = useRef(0);
-  const liveSpeakerIndex = useRef(0);
+  const micStreamRef = useRef<MediaStream | null>(null);
+  const audioContextRef = useRef<AudioContext | null>(null);
+  const volumeFrameRef = useRef<number | null>(null);
+  const liveTranscriptCache = useRef<Record<number, string>>({});
   const captionEndRef = useRef<HTMLDivElement>(null);
 
   const selectedScenario = useMemo(
@@ -79,11 +83,12 @@ function App() {
     return () => {
       speechAdapter.stop();
       demoControlsRef.current?.stop();
+      stopVolumeMeter();
     };
   }, []);
 
   useEffect(() => {
-    captionEndRef.current?.scrollIntoView({ behavior: "smooth" });
+    captionEndRef.current?.scrollIntoView({ behavior: "auto" });
   }, [visibleCaptions]);
 
   function addSessionEvent(event: SessionEvent) {
@@ -170,21 +175,21 @@ function App() {
       return;
     }
 
+    void startVolumeMeter();
+
     speechAdapter.start(
       async (result) => {
         const rawText = sanitizeText(result.text);
         if (!rawText) return;
+        if (liveTranscriptCache.current[result.resultIndex] === rawText) return;
+        liveTranscriptCache.current[result.resultIndex] = rawText;
 
-        const id = `live-${transcriptCounter.current}`;
-        transcriptCounter.current += 1;
-        const speakerIdx = liveSpeakerIndex.current % 3;
-        liveSpeakerIndex.current += 1;
-        const speakerId = `live_${String.fromCharCode(97 + speakerIdx)}`;
+        const id = `live-${result.resultIndex}`;
         const entities = extractEntities(rawText);
         const caption: CaptionSegment = {
           id,
-          speakerId,
-          speakerLabel: `Speaker ${String.fromCharCode(65 + speakerIdx)}`,
+          speakerId: "live_a",
+          speakerLabel: "Live speaker",
           text: rawText,
           confidence: result.confidence,
           timestamp: timeLabel(),
@@ -203,7 +208,7 @@ function App() {
           return [...current, caption];
         });
 
-        if (plainLanguageEnabled) {
+        if (plainLanguageEnabled && result.isFinal) {
           const plainLanguageText = await simplifySentence(rawText);
           setCaptions((current) =>
             current.map((item) =>
@@ -212,11 +217,13 @@ function App() {
           );
         }
 
-        addSessionEvent({
-          type: "caption",
-          timestamp: caption.timestamp,
-          payload: { live: true, confidence: caption.confidence },
-        });
+        if (result.isFinal) {
+          addSessionEvent({
+            type: "caption",
+            timestamp: caption.timestamp,
+            payload: { live: true, confidence: caption.confidence },
+          });
+        }
         setStatusMessage("Live captions are flowing.");
       },
       (message) => {
@@ -229,8 +236,11 @@ function App() {
   function resetSession(clearSaved = true) {
     speechAdapter.stop();
     demoControlsRef.current?.stop();
+    stopVolumeMeter();
     demoControlsRef.current = null;
+    liveTranscriptCache.current = {};
     setListening(false);
+    setMicLevel(0);
     setCaptions([]);
     setEvents([]);
     setSoundAlerts([]);
@@ -243,8 +253,11 @@ function App() {
   function endSession() {
     speechAdapter.stop();
     demoControlsRef.current?.stop();
+    stopVolumeMeter();
     demoControlsRef.current = null;
+    liveTranscriptCache.current = {};
     setListening(false);
+    setMicLevel(0);
     if (!saved) {
       setCaptions([]);
       setSoundAlerts([]);
@@ -271,6 +284,56 @@ function App() {
     const utterance = new SpeechSynthesisUtterance(caption.text);
     utterance.rate = 0.9;
     window.speechSynthesis.speak(utterance);
+  }
+
+  async function startVolumeMeter() {
+    if (!navigator.mediaDevices?.getUserMedia) return;
+
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const audioContext = new AudioContext();
+      const analyser = audioContext.createAnalyser();
+      const source = audioContext.createMediaStreamSource(stream);
+
+      analyser.fftSize = 512;
+      source.connect(analyser);
+
+      const samples = new Uint8Array(analyser.fftSize);
+      micStreamRef.current = stream;
+      audioContextRef.current = audioContext;
+
+      const updateLevel = () => {
+        analyser.getByteTimeDomainData(samples);
+        let sumSquares = 0;
+
+        for (const sample of samples) {
+          const normalized = (sample - 128) / 128;
+          sumSquares += normalized * normalized;
+        }
+
+        const rms = Math.sqrt(sumSquares / samples.length);
+        const nextLevel = Math.max(0, Math.min(1, (rms - 0.015) * 12));
+        setMicLevel((current) => current * 0.5 + nextLevel * 0.5);
+        volumeFrameRef.current = window.requestAnimationFrame(updateLevel);
+      };
+
+      updateLevel();
+    } catch {
+      setMicLevel(0);
+    }
+  }
+
+  function stopVolumeMeter() {
+    if (volumeFrameRef.current !== null) {
+      window.cancelAnimationFrame(volumeFrameRef.current);
+      volumeFrameRef.current = null;
+    }
+
+    micStreamRef.current?.getTracks().forEach((track) => track.stop());
+    micStreamRef.current = null;
+
+    void audioContextRef.current?.close();
+    audioContextRef.current = null;
   }
 
   const selectedCaption = captions.find((caption) => caption.id === selectedCaptionId) ?? null;
@@ -317,6 +380,11 @@ function App() {
               <h2>Phone-between-you conversation design</h2>
             </div>
             <span className={`status-pill ${listening ? "live" : ""}`}>
+              {listening ? (
+                <span className="volume-dot" aria-hidden="true">
+                  <span style={{ height: `${Math.round(micLevel * 100)}%` }} />
+                </span>
+              ) : null}
               {listening ? "Session live" : "Idle"}
             </span>
           </div>
@@ -449,13 +517,6 @@ function App() {
               <button type="button" onClick={startLiveCaptions}>
                 Start live captions
               </button>
-              <button
-                type="button"
-                className="secondary"
-                onClick={() => startDemoScenario(selectedScenario)}
-              >
-                Run demo scenario
-              </button>
               <button type="button" className="secondary" onClick={saveSession}>
                 Save session
               </button>
@@ -490,28 +551,49 @@ function App() {
                 Memory view
               </button>
             </div>
-          </section>
 
-          <section className="control-card">
-            <p className="eyebrow">Demo Mode</p>
-            <div className="scenario-list">
-              {scenarios.map((scenario) => (
+            <label className="demo-checkbox">
+              <input
+                type="checkbox"
+                checked={showDemoOptions}
+                onChange={(event) => setShowDemoOptions(event.currentTarget.checked)}
+              />
+              <span>
+                <strong>Show demo options</strong>
+                <small>Use scripted captions when testing without a microphone.</small>
+              </span>
+            </label>
+
+            {showDemoOptions ? (
+              <div className="demo-options">
                 <button
-                  key={scenario.id}
                   type="button"
-                  className={`scenario-card ${selectedScenario.id === scenario.id ? "active" : ""}`}
-                  onClick={() => setSelectedScenarioId(scenario.id)}
+                  className="secondary run-demo-button"
+                  onClick={() => startDemoScenario(selectedScenario)}
                 >
-                  <strong>{scenario.title}</strong>
-                  <span>{scenario.context}</span>
-                  <small>
-                    {scenario.supportsLiveAudio
-                      ? "Supports live audio fallback"
-                      : "Scripted demo reliability"}
-                  </small>
+                  Run selected demo
                 </button>
-              ))}
-            </div>
+
+                <div className="scenario-list">
+                  {scenarios.map((scenario) => (
+                    <button
+                      key={scenario.id}
+                      type="button"
+                      className={`scenario-card ${selectedScenario.id === scenario.id ? "active" : ""}`}
+                      onClick={() => setSelectedScenarioId(scenario.id)}
+                    >
+                      <strong>{scenario.title}</strong>
+                      <span>{scenario.context}</span>
+                      <small>
+                        {scenario.supportsLiveAudio
+                          ? "Supports live audio fallback"
+                          : "Scripted demo reliability"}
+                      </small>
+                    </button>
+                  ))}
+                </div>
+              </div>
+            ) : null}
           </section>
 
           <section className="control-card memory-card">

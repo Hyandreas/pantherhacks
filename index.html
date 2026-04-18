@@ -9,7 +9,7 @@
     <meta name="referrer" content="no-referrer" />
     <meta
       http-equiv="Content-Security-Policy"
-      content="default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' https://fonts.googleapis.com 'unsafe-inline'; font-src https://fonts.gstatic.com; img-src 'self' data:; connect-src 'self'; media-src 'self'; object-src 'none'; base-uri 'self';"
+      content="default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' https://fonts.googleapis.com 'unsafe-inline'; font-src https://fonts.gstatic.com; img-src 'self' data:; connect-src 'self' http://127.0.0.1:* ws://127.0.0.1:*; media-src 'self'; object-src 'none'; base-uri 'self';"
     />
     <title>Lumen</title>
     <meta
@@ -22,9 +22,60 @@
       href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;700;800&family=Syne:wght@500;700;800&display=swap"
       rel="stylesheet"
     />
+    <style>
+      html,
+      body,
+      #root {
+        min-height: 100vh;
+        margin: 0;
+        background: #081512;
+        color: #edf8f2;
+        font-family: Manrope, system-ui, sans-serif;
+      }
+
+      .boot-fallback {
+        min-height: 100vh;
+        display: grid;
+        place-items: center;
+        padding: 24px;
+        background:
+          radial-gradient(circle at top left, rgba(41, 134, 109, 0.28), transparent 32%),
+          linear-gradient(180deg, #0b1714 0%, #07110e 100%);
+      }
+
+      .boot-fallback div {
+        max-width: 560px;
+        border: 1px solid rgba(175, 233, 212, 0.18);
+        border-radius: 18px;
+        padding: 24px;
+        background: rgba(12, 35, 30, 0.72);
+      }
+
+      .boot-fallback h1 {
+        margin: 0 0 12px;
+        font-size: 2rem;
+      }
+
+      .boot-fallback p {
+        margin: 0;
+        color: #9cc2b2;
+        line-height: 1.5;
+      }
+    </style>
     <script type="module" src="/src/main.tsx"></script>
   </head>
   <body>
-    <div id="root"></div>
+    <div id="root">
+      <main class="boot-fallback">
+        <div>
+          <h1>Lumen is loading</h1>
+          <p>
+            If this stays visible, the React bundle did not run. Do not open
+            this file directly or with VS Code Live Server. Run npm run
+            preview:clean and open http://127.0.0.1:4175.
+          </p>
+        </div>
+      </main>
+    </div>
   </body>
 </html>
