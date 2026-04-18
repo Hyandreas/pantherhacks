@@ -21,6 +21,8 @@ declare global {
 export interface LiveCaptionResult {
   text: string;
   confidence: number;
+  resultIndex: number;
+  isFinal: boolean;
 }
 
 export interface LiveCaptionAdapter {
@@ -75,6 +77,8 @@ export class BrowserSpeechAdapter implements LiveCaptionAdapter {
         onCaption({
           text: transcript,
           confidence: result[0]?.confidence ?? (result.isFinal ? 0.88 : 0.62),
+          resultIndex: i,
+          isFinal: result.isFinal,
         });
       }
     };

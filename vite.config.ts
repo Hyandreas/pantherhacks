@@ -8,11 +8,11 @@ const securityHeaders = {
   "Permissions-Policy": "microphone=(self), camera=(), geolocation=()",
   "Content-Security-Policy": [
     "default-src 'self'",
-    "script-src 'self' 'unsafe-inline'",
+    "script-src 'self' 'unsafe-inline' 'unsafe-eval'",
     "style-src 'self' https://fonts.googleapis.com 'unsafe-inline'",
     "font-src https://fonts.gstatic.com",
     "img-src 'self' data:",
-    "connect-src 'self'",
+    "connect-src 'self' http://127.0.0.1:* ws://127.0.0.1:*",
     "media-src 'self'",
     "object-src 'none'",
     "base-uri 'self'",
@@ -20,6 +20,7 @@ const securityHeaders = {
 };
 
 export default defineConfig({
+  base: "./",
   plugins: [react()],
   server: { headers: securityHeaders },
   preview: { headers: securityHeaders },

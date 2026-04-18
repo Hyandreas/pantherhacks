@@ -24,6 +24,14 @@ const speakerPalette: Record<string, string> = {
   live_c: "#d6c2ff",
 };
 
+interface MissedMoment {
+  id: string;
+  timestamp: string;
+  beforeCaptionId?: string;
+  recoveryCaptionId?: string;
+  status: "waiting" | "captured";
+}
+
 function sanitizeText(text: string): string {
   return text.slice(0, 500).replace(/[<>]/g, "");
 }
@@ -32,20 +40,29 @@ function App() {
   const [sessionMode, setSessionMode] = useState<SessionMode>("bridge");
   const [selectedScenarioId, setSelectedScenarioId] = useState(scenarios[0].id);
   const [captions, setCaptions] = useState<CaptionSegment[]>([]);
-  const [events, setEvents] = useState<SessionEvent[]>([]);
+  const [, setEvents] = useState<SessionEvent[]>([]);
   const [soundAlerts, setSoundAlerts] = useState<SoundAlert[]>([]);
   const [listening, setListening] = useState(false);
   const [plainLanguageEnabled, setPlainLanguageEnabled] = useState(true);
   const [focusEnabled, setFocusEnabled] = useState(false);
+  const [showDemoOptions, setShowDemoOptions] = useState(false);
   const [saved, setSaved] = useState(false);
+  const [hearingPrompt, setHearingPrompt] = useState<string | null>(null);
+  const [missedMoments, setMissedMoments] = useState<MissedMoment[]>([]);
+  const [pendingMissedMomentId, setPendingMissedMomentId] = useState<string | null>(null);
   const [statusMessage, setStatusMessage] = useState(
     "Consent-first bridge mode is ready. Start live captions or run a scenario.",
   );
   const [selectedCaptionId, setSelectedCaptionId] = useState<string | null>(null);
   const [flashCritical, setFlashCritical] = useState(false);
+  const [micLevel, setMicLevel] = useState(0);
   const demoControlsRef = useRef<DemoAdapterControls | null>(null);
-  const transcriptCounter = useRef(0);
-  const liveSpeakerIndex = useRef(0);
+  const micStreamRef = useRef<MediaStream | null>(null);
+  const audioContextRef = useRef<AudioContext | null>(null);
+  const volumeFrameRef = useRef<number | null>(null);
+  const liveTranscriptCache = useRef<Record<string, string>>({});
+  const pendingMissedMomentIdRef = useRef<string | null>(null);
+  const pendingMissedBeforeCaptionIdRef = useRef<string | null>(null);
   const captionEndRef = useRef<HTMLDivElement>(null);
 
   const selectedScenario = useMemo(
@@ -75,15 +92,22 @@ function App() {
       .slice(0, 5);
   }, [captions]);
 
+  const latestCaption = visibleCaptions[visibleCaptions.length - 1] ?? null;
+  const confidenceState = latestCaption ? confidenceLabel(latestCaption.confidence) : null;
+  const pendingMissedMoment = missedMoments.find(
+    (moment) => moment.id === pendingMissedMomentId,
+  );
+
   useEffect(() => {
     return () => {
       speechAdapter.stop();
       demoControlsRef.current?.stop();
+      stopVolumeMeter();
     };
   }, []);
 
   useEffect(() => {
-    captionEndRef.current?.scrollIntoView({ behavior: "smooth" });
+    captionEndRef.current?.scrollIntoView({ behavior: "auto" });
   }, [visibleCaptions]);
 
   function addSessionEvent(event: SessionEvent) {
@@ -128,9 +152,13 @@ function App() {
       plainLanguageText: plainLanguageEnabled ? event.plainLanguageText : undefined,
       entities: event.entities ?? extractEntities(event.text),
       isFocused: isFocusedText(event.entities ?? extractEntities(event.text), event.text),
+      recoveryForId: pendingMissedMomentIdRef.current ?? undefined,
     };
 
     setCaptions((current) => [...current, caption]);
+    if (pendingMissedMomentIdRef.current) {
+      captureMissedMomentRecovery(pendingMissedMomentIdRef.current, caption.id);
+    }
     addSessionEvent({
       type: "caption",
       timestamp: caption.timestamp,
@@ -170,26 +198,34 @@ function App() {
       return;
     }
 
+    void startVolumeMeter();
+
     speechAdapter.start(
       async (result) => {
         const rawText = sanitizeText(result.text);
         if (!rawText) return;
 
-        const id = `live-${transcriptCounter.current}`;
-        transcriptCounter.current += 1;
-        const speakerIdx = liveSpeakerIndex.current % 3;
-        liveSpeakerIndex.current += 1;
-        const speakerId = `live_${String.fromCharCode(97 + speakerIdx)}`;
+        const pendingRecoveryId = pendingMissedMomentIdRef.current;
+        const cacheKey = `${result.resultIndex}:${pendingRecoveryId ?? "normal"}`;
+        if (liveTranscriptCache.current[cacheKey] === rawText) return;
+        liveTranscriptCache.current[cacheKey] = rawText;
+
+        const baseId = `live-${result.resultIndex}`;
+        const id =
+          pendingRecoveryId && pendingMissedBeforeCaptionIdRef.current === baseId
+            ? `${baseId}-repeat-${pendingRecoveryId}`
+            : baseId;
         const entities = extractEntities(rawText);
         const caption: CaptionSegment = {
           id,
-          speakerId,
-          speakerLabel: `Speaker ${String.fromCharCode(65 + speakerIdx)}`,
+          speakerId: "live_a",
+          speakerLabel: "Live speaker",
           text: rawText,
           confidence: result.confidence,
           timestamp: timeLabel(),
           entities,
           isFocused: isFocusedText(entities, rawText),
+          recoveryForId: pendingRecoveryId ?? undefined,
         };
 
         setCaptions((current) => {
@@ -203,7 +239,7 @@ function App() {
           return [...current, caption];
         });
 
-        if (plainLanguageEnabled) {
+        if (plainLanguageEnabled && result.isFinal) {
           const plainLanguageText = await simplifySentence(rawText);
           setCaptions((current) =>
             current.map((item) =>
@@ -212,11 +248,16 @@ function App() {
           );
         }
 
-        addSessionEvent({
-          type: "caption",
-          timestamp: caption.timestamp,
-          payload: { live: true, confidence: caption.confidence },
-        });
+        if (result.isFinal) {
+          if (pendingRecoveryId) {
+            captureMissedMomentRecovery(pendingRecoveryId, id);
+          }
+          addSessionEvent({
+            type: "caption",
+            timestamp: caption.timestamp,
+            payload: { live: true, confidence: caption.confidence },
+          });
+        }
         setStatusMessage("Live captions are flowing.");
       },
       (message) => {
@@ -229,12 +270,20 @@ function App() {
   function resetSession(clearSaved = true) {
     speechAdapter.stop();
     demoControlsRef.current?.stop();
+    stopVolumeMeter();
     demoControlsRef.current = null;
+    liveTranscriptCache.current = {};
     setListening(false);
+    setMicLevel(0);
     setCaptions([]);
     setEvents([]);
     setSoundAlerts([]);
     setSelectedCaptionId(null);
+    setHearingPrompt(null);
+    setMissedMoments([]);
+    setPendingMissedMomentId(null);
+    pendingMissedMomentIdRef.current = null;
+    pendingMissedBeforeCaptionIdRef.current = null;
     if (clearSaved) {
       setSaved(false);
     }
@@ -243,8 +292,13 @@ function App() {
   function endSession() {
     speechAdapter.stop();
     demoControlsRef.current?.stop();
+    stopVolumeMeter();
     demoControlsRef.current = null;
+    liveTranscriptCache.current = {};
+    pendingMissedMomentIdRef.current = null;
+    pendingMissedBeforeCaptionIdRef.current = null;
     setListening(false);
+    setMicLevel(0);
     if (!saved) {
       setCaptions([]);
       setSoundAlerts([]);
@@ -273,6 +327,105 @@ function App() {
     window.speechSynthesis.speak(utterance);
   }
 
+  function showHearingPrompt(message: string) {
+    setHearingPrompt(message);
+    setStatusMessage(`Showing request: ${message}`);
+  }
+
+  function markMissedMoment() {
+    const momentId = `missed-${Date.now()}`;
+    const beforeCaption = captions[captions.length - 1];
+
+    setMissedMoments((current) => [
+      ...current,
+      {
+        id: momentId,
+        timestamp: timeLabel(),
+        beforeCaptionId: beforeCaption?.id,
+        status: "waiting",
+      },
+    ]);
+
+    if (beforeCaption) {
+      setCaptions((current) =>
+        current.map((caption) =>
+          caption.id === beforeCaption.id
+            ? { ...caption, missedMomentId: momentId }
+            : caption,
+        ),
+      );
+    }
+
+    setPendingMissedMomentId(momentId);
+    pendingMissedMomentIdRef.current = momentId;
+    pendingMissedBeforeCaptionIdRef.current = beforeCaption?.id ?? null;
+    showHearingPrompt("Please repeat the last part. I missed it.");
+  }
+
+  function captureMissedMomentRecovery(momentId: string, captionId: string) {
+    setMissedMoments((current) =>
+      current.map((moment) =>
+        moment.id === momentId
+          ? { ...moment, recoveryCaptionId: captionId, status: "captured" }
+          : moment,
+      ),
+    );
+    setPendingMissedMomentId(null);
+    pendingMissedMomentIdRef.current = null;
+    pendingMissedBeforeCaptionIdRef.current = null;
+    setStatusMessage("Repeat captured and linked to the missed moment.");
+  }
+
+  async function startVolumeMeter() {
+    if (!navigator.mediaDevices?.getUserMedia) return;
+
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const audioContext = new AudioContext();
+      const analyser = audioContext.createAnalyser();
+      const source = audioContext.createMediaStreamSource(stream);
+
+      analyser.fftSize = 512;
+      source.connect(analyser);
+
+      const samples = new Uint8Array(analyser.fftSize);
+      micStreamRef.current = stream;
+      audioContextRef.current = audioContext;
+
+      const updateLevel = () => {
+        analyser.getByteTimeDomainData(samples);
+        let sumSquares = 0;
+
+        for (const sample of samples) {
+          const normalized = (sample - 128) / 128;
+          sumSquares += normalized * normalized;
+        }
+
+        const rms = Math.sqrt(sumSquares / samples.length);
+        const nextLevel = Math.max(0, Math.min(1, (rms - 0.015) * 12));
+        setMicLevel((current) => current * 0.5 + nextLevel * 0.5);
+        volumeFrameRef.current = window.requestAnimationFrame(updateLevel);
+      };
+
+      updateLevel();
+    } catch {
+      setMicLevel(0);
+    }
+  }
+
+  function stopVolumeMeter() {
+    if (volumeFrameRef.current !== null) {
+      window.cancelAnimationFrame(volumeFrameRef.current);
+      volumeFrameRef.current = null;
+    }
+
+    micStreamRef.current?.getTracks().forEach((track) => track.stop());
+    micStreamRef.current = null;
+
+    void audioContextRef.current?.close();
+    audioContextRef.current = null;
+  }
+
   const selectedCaption = captions.find((caption) => caption.id === selectedCaptionId) ?? null;
 
   return (
@@ -287,25 +440,11 @@ function App() {
       <header className="hero">
         <div className="hero-copy">
           <p className="eyebrow">Lumen</p>
-          <h1>Making spoken language visible.</h1>
+          <h1>Live captions for real conversations.</h1>
           <p className="hero-text">
-            A privacy-first accessibility assistant for hard-of-hearing,
-            late-deafened, and speech-processing-challenged adults.
+            Start captions, keep the original words visible, and ask for repair
+            when the transcript is uncertain.
           </p>
-        </div>
-        <div className="hero-metrics">
-          <div className="metric-card">
-            <span>Core insight</span>
-            <strong>Bridge Mode</strong>
-          </div>
-          <div className="metric-card">
-            <span>Hackathon surface</span>
-            <strong>Web demo</strong>
-          </div>
-          <div className="metric-card">
-            <span>Trust rule</span>
-            <strong>Visible consent</strong>
-          </div>
         </div>
       </header>
 
@@ -313,10 +452,15 @@ function App() {
         <section className="bridge-panel">
           <div className="section-head">
             <div>
-              <p className="eyebrow">Bridge Mode</p>
-              <h2>Phone-between-you conversation design</h2>
+              <p className="eyebrow">Big Caption Mode</p>
+              <h2>Follow the words first</h2>
             </div>
             <span className={`status-pill ${listening ? "live" : ""}`}>
+              {listening ? (
+                <span className="volume-dot" aria-hidden="true">
+                  <span style={{ height: `${Math.round(micLevel * 100)}%` }} />
+                </span>
+              ) : null}
               {listening ? "Session live" : "Idle"}
             </span>
           </div>
@@ -325,17 +469,69 @@ function App() {
             <div className="device-side device-side-user">
               <div className="panel-label">User side</div>
               <div className="bridge-stack">
-                <div className="trust-banner">
+                <div className="trust-banner" aria-live="polite">
                   <span className="dot" />
                   {statusMessage}
                 </div>
+                <section className="big-caption-stage" aria-live="polite" aria-label="Current caption">
+                  {latestCaption ? (
+                    <>
+                      <div className="big-caption-meta">
+                        <span>{latestCaption.speakerLabel}</span>
+                        <span className={`confidence-badge ${confidenceState?.tone ?? ""}`}>
+                          {confidenceState?.label}
+                        </span>
+                      </div>
+                      <p>{latestCaption.text}</p>
+                      {latestCaption.plainLanguageText ? (
+                        <small>Plain language: {latestCaption.plainLanguageText}</small>
+                      ) : null}
+                    </>
+                  ) : (
+                    <>
+                      <div className="big-caption-meta">
+                        <span>Ready</span>
+                        <span className="confidence-badge">No speech yet</span>
+                      </div>
+                      <p>Press Start live captions and place the phone near the speaker.</p>
+                    </>
+                  )}
+                </section>
+                <div className="repair-actions">
+                  <button
+                    type="button"
+                    className="missed-button"
+                    onClick={markMissedMoment}
+                  >
+                    I missed that
+                  </button>
+                  <button
+                    type="button"
+                    className="secondary"
+                    onClick={() => showHearingPrompt("Please repeat that more slowly.")}
+                  >
+                    Repeat slowly
+                  </button>
+                  <button
+                    type="button"
+                    className="secondary"
+                    onClick={() => showHearingPrompt("Please face me while speaking.")}
+                  >
+                    Please face me
+                  </button>
+                </div>
+                {pendingMissedMoment ? (
+                  <div className="missed-status" aria-live="polite">
+                    Waiting for the speaker to repeat the last part.
+                  </div>
+                ) : null}
                 <div className="caption-stream">
                   {visibleCaptions.length === 0 ? (
                     <div className="empty-state">
                       <strong>Nothing captured yet.</strong>
                       <p>
-                        Start live captions or run a scenario to see confidence,
-                        speaker labels, focus mode, memory, and plain language.
+                        Start live captions to see the full transcript history.
+                        Use the repeat button if anything is unclear.
                       </p>
                     </div>
                   ) : (
@@ -359,6 +555,16 @@ function App() {
                           <span>{caption.timestamp}</span>
                           <span>{Math.round(caption.confidence * 100)}%</span>
                         </div>
+                        {caption.missedMomentId ? (
+                          <div className="moment-marker missed">
+                            Missed moment marked here
+                          </div>
+                        ) : null}
+                        {caption.recoveryForId ? (
+                          <div className="moment-marker recovery">
+                            Repeat attempt captured
+                          </div>
+                        ) : null}
                         <p
                           className="caption-text"
                           style={{ opacity: 0.45 + caption.confidence * 0.55 }}
@@ -395,29 +601,35 @@ function App() {
 
             <div className="device-side device-side-hearing">
               <div className="panel-label">Hearing side</div>
-              <div className="consent-card">
-                <p className="eyebrow">Accessibility Notice</p>
-                <h3>This conversation is being captioned for accessibility.</h3>
-                <p>
-                  Captions are visible to both sides. Audio is not hidden, and
-                  session memory only persists if the user explicitly saves it.
-                </p>
+              <div className="consent-card hearing-card">
+                <p className="eyebrow">For the speaker</p>
+                {hearingPrompt ? (
+                  <>
+                    <h3>{hearingPrompt}</h3>
+                    <p>Thanks. Short pauses and clear speech help captions stay reliable.</p>
+                  </>
+                ) : (
+                  <>
+                    <h3>I use live captions to understand speech.</h3>
+                    <p>Please speak normally and face me when you can. Audio is not secretly recorded; notes are only saved if I choose to save them.</p>
+                  </>
+                )}
                 <div className="consent-grid">
                   <div>
-                    <span>Audio</span>
-                    <strong>Visible in-session only</strong>
+                    <span>Mic</span>
+                    <strong>{listening ? "Listening now" : "Off"}</strong>
                   </div>
                   <div>
-                    <span>Cloud</span>
-                    <strong>Text-only plain language</strong>
+                    <span>Saving</span>
+                    <strong>{saved ? "Saved by user" : "Not saved"}</strong>
                   </div>
                   <div>
-                    <span>Retention</span>
-                    <strong>Ends unless saved</strong>
+                    <span>Best help</span>
+                    <strong>Face the phone</strong>
                   </div>
                   <div>
-                    <span>Fallback</span>
-                    <strong>Scenario demo mode</strong>
+                    <span>Repair</span>
+                    <strong>Repeat if asked</strong>
                   </div>
                 </div>
               </div>
@@ -448,13 +660,6 @@ function App() {
             <div className="button-grid">
               <button type="button" onClick={startLiveCaptions}>
                 Start live captions
-              </button>
-              <button
-                type="button"
-                className="secondary"
-                onClick={() => startDemoScenario(selectedScenario)}
-              >
-                Run demo scenario
               </button>
               <button type="button" className="secondary" onClick={saveSession}>
                 Save session
@@ -490,28 +695,49 @@ function App() {
                 Memory view
               </button>
             </div>
-          </section>
 
-          <section className="control-card">
-            <p className="eyebrow">Demo Mode</p>
-            <div className="scenario-list">
-              {scenarios.map((scenario) => (
+            <label className="demo-checkbox">
+              <input
+                type="checkbox"
+                checked={showDemoOptions}
+                onChange={(event) => setShowDemoOptions(event.currentTarget.checked)}
+              />
+              <span>
+                <strong>Show demo options</strong>
+                <small>Use scripted captions when testing without a microphone.</small>
+              </span>
+            </label>
+
+            {showDemoOptions ? (
+              <div className="demo-options">
                 <button
-                  key={scenario.id}
                   type="button"
-                  className={`scenario-card ${selectedScenario.id === scenario.id ? "active" : ""}`}
-                  onClick={() => setSelectedScenarioId(scenario.id)}
+                  className="secondary run-demo-button"
+                  onClick={() => startDemoScenario(selectedScenario)}
                 >
-                  <strong>{scenario.title}</strong>
-                  <span>{scenario.context}</span>
-                  <small>
-                    {scenario.supportsLiveAudio
-                      ? "Supports live audio fallback"
-                      : "Scripted demo reliability"}
-                  </small>
+                  Run selected demo
                 </button>
-              ))}
-            </div>
+
+                <div className="scenario-list">
+                  {scenarios.map((scenario) => (
+                    <button
+                      key={scenario.id}
+                      type="button"
+                      className={`scenario-card ${selectedScenario.id === scenario.id ? "active" : ""}`}
+                      onClick={() => setSelectedScenarioId(scenario.id)}
+                    >
+                      <strong>{scenario.title}</strong>
+                      <span>{scenario.context}</span>
+                      <small>
+                        {scenario.supportsLiveAudio
+                          ? "Supports live audio fallback"
+                          : "Scripted demo reliability"}
+                      </small>
+                    </button>
+                  ))}
+                </div>
+              </div>
+            ) : null}
           </section>
 
           <section className="control-card memory-card">
@@ -530,6 +756,15 @@ function App() {
                 ))
               )}
             </div>
+            {missedMoments.length ? (
+              <div className="missed-summary">
+                <h3>Missed moments</h3>
+                <p>
+                  {missedMoments.filter((moment) => moment.status === "captured").length} of{" "}
+                  {missedMoments.length} repeat attempts captured.
+                </p>
+              </div>
+            ) : null}
             {selectedCaption ? (
               <div className="replay-card">
                 <p className="eyebrow">Tap-to-replay</p>
@@ -544,32 +779,6 @@ function App() {
                 </button>
               </div>
             ) : null}
-          </section>
-
-          <section className="control-card architecture-card">
-            <p className="eyebrow">Feature Coverage</p>
-            <ul>
-              <li>Live captions with confidence</li>
-              <li>Bridge Mode consent surface</li>
-              <li>Speaker-labeled caption bubbles</li>
-              <li>Plain language layer</li>
-              <li>Sound event detection</li>
-              <li>Conversation memory + replay</li>
-              <li>Focus mode</li>
-            </ul>
-            <div className="event-log">
-              <p className="eyebrow">Session Event Log</p>
-              {events.length === 0 ? (
-                <p className="muted">Consent, caption, summary, and sound events appear here.</p>
-              ) : (
-                events.slice(-5).reverse().map((event, index) => (
-                  <div key={`${event.timestamp}-${event.type}-${index}`} className="event-row">
-                    <strong>{event.type}</strong>
-                    <span>{event.timestamp}</span>
-                  </div>
-                ))
-              )}
-            </div>
           </section>
         </aside>
       </main>
@@ -596,6 +805,12 @@ function isFocusedText(entities: string[], text: string) {
     entities.length > 0 ||
     /\b(agree|due|reserve|schedule|take|start|leave|count|message)\b/i.test(text)
   );
+}
+
+function confidenceLabel(confidence: number) {
+  if (confidence >= 0.88) return { label: "High confidence", tone: "good" };
+  if (confidence >= 0.72) return { label: "Check wording", tone: "warn" };
+  return { label: "Uncertain", tone: "danger" };
 }
 
 export default App;
