@@ -1,22 +1,8 @@
 import type { Scenario, ScenarioTranscriptEvent } from "./types";
 
-type RecognitionCtor = new () => {
-  continuous: boolean;
-  interimResults: boolean;
-  lang: string;
-  onresult: ((event: Event) => void) | null;
-  onerror: ((event: Event) => void) | null;
-  onend: (() => void) | null;
-  start: () => void;
-  stop: () => void;
-};
-
-declare global {
-  interface Window {
-    webkitSpeechRecognition?: RecognitionCtor;
-    SpeechRecognition?: RecognitionCtor;
-  }
-}
+const DEEPGRAM_PROXY_URL =
+  import.meta.env.VITE_DEEPGRAM_PROXY_URL ?? "ws://127.0.0.1:8788/captions";
+const DEEPGRAM_CHUNK_MS = 250;
 
 export interface LiveCaptionResult {
   text: string;
@@ -34,75 +20,145 @@ export interface LiveCaptionAdapter {
   stop(): void;
 }
 
-export class BrowserSpeechAdapter implements LiveCaptionAdapter {
-  private recognition:
-    | InstanceType<RecognitionCtor>
-    | undefined;
+interface DeepgramResultMessage {
+  type?: string;
+  channel?: {
+    alternatives?: Array<{
+      transcript?: string;
+      confidence?: number;
+    }>;
+  };
+  start?: number;
+  is_final?: boolean;
+  speech_final?: boolean;
+  error?: string;
+}
+
+export class DeepgramCaptionAdapter implements LiveCaptionAdapter {
+  private recorder: MediaRecorder | undefined;
+  private socket: WebSocket | undefined;
+  private stream: MediaStream | undefined;
+  private fallbackIndex = 0;
 
   isSupported() {
-    return Boolean(window.SpeechRecognition || window.webkitSpeechRecognition);
+    return (
+      "WebSocket" in window &&
+      "MediaRecorder" in window &&
+      Boolean(navigator.mediaDevices?.getUserMedia)
+    );
   }
 
-  start(
+  async start(
     onCaption: (result: LiveCaptionResult) => void,
     onError: (message: string) => void,
   ) {
-    const Recognition =
-      window.SpeechRecognition || window.webkitSpeechRecognition;
-
-    if (!Recognition) {
-      onError("Live microphone captions are unavailable in this browser.");
+    if (!this.isSupported()) {
+      onError("Live microphone streaming is not available in this browser.");
       return;
     }
 
-    this.recognition = new Recognition();
-    this.recognition.continuous = true;
-    this.recognition.interimResults = true;
-    this.recognition.lang = "en-US";
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const socket = new WebSocket(DEEPGRAM_PROXY_URL);
 
-    this.recognition.onresult = (event: Event) => {
-      const speechEvent = event as Event & {
-        results: ArrayLike<{
-          isFinal: boolean;
-          0: { transcript: string; confidence?: number };
-        }>;
-        resultIndex: number;
+      this.stream = stream;
+      this.socket = socket;
+
+      socket.onopen = () => {
+        const recorder = createMediaRecorder(stream);
+        this.recorder = recorder;
+
+        recorder.ondataavailable = (event) => {
+          if (event.data.size > 0 && socket.readyState === WebSocket.OPEN) {
+            socket.send(event.data);
+          }
+        };
+
+        recorder.start(DEEPGRAM_CHUNK_MS);
       };
 
-      for (let i = speechEvent.resultIndex; i < speechEvent.results.length; i += 1) {
-        const result = speechEvent.results[i];
-        if (!result) continue;
-        const transcript = result[0]?.transcript?.trim();
-        if (!transcript) continue;
+      socket.onmessage = (event) => {
+        const message = parseDeepgramMessage(event.data);
+        if (!message) return;
+
+        if (message.type === "Error") {
+          onError(message.error ?? "Deepgram captioning failed.");
+          return;
+        }
+
+        if (message.type !== "Results") return;
+
+        const alternative = message.channel?.alternatives?.[0];
+        const text = alternative?.transcript?.trim();
+        if (!text || !alternative) return;
+
+        const resultIndex =
+          typeof message.start === "number"
+            ? Math.round(message.start * 1000)
+            : this.fallbackIndex;
+
         onCaption({
-          text: transcript,
-          confidence: result[0]?.confidence ?? (result.isFinal ? 0.88 : 0.62),
-          resultIndex: i,
-          isFinal: result.isFinal,
+          text,
+          confidence: alternative.confidence ?? 0.82,
+          resultIndex,
+          isFinal: Boolean(message.is_final || message.speech_final),
         });
-      }
-    };
 
-    this.recognition.onerror = (event: Event) => {
-      const speechEvent = event as Event & { error?: string };
-      onError(
-        speechEvent.error === "not-allowed"
-          ? "Microphone permission was denied. Lumen switched cleanly to demo mode."
-          : "Live recognition paused. Demo mode is ready as a fallback.",
-      );
-    };
+        if (message.is_final || message.speech_final) {
+          this.fallbackIndex += 1;
+        }
+      };
 
-    this.recognition.onend = () => {
-      this.recognition = undefined;
-    };
+      socket.onerror = () => {
+        onError("Deepgram proxy is unavailable. Start deepgram_server first.");
+      };
 
-    this.recognition.start();
+      socket.onclose = () => {
+        if (this.recorder?.state === "recording") {
+          onError("Deepgram captions disconnected. Check the deepgram_server terminal.");
+        }
+      };
+    } catch {
+      onError("Microphone permission was denied or Deepgram captions could not start.");
+    }
   }
 
   stop() {
-    this.recognition?.stop();
-    this.recognition = undefined;
+    if (this.recorder?.state !== "inactive") {
+      this.recorder?.stop();
+    }
+    this.recorder = undefined;
+    this.socket?.close();
+    this.socket = undefined;
+    this.stream?.getTracks().forEach((track) => track.stop());
+    this.stream = undefined;
+    this.fallbackIndex = 0;
   }
+}
+
+function parseDeepgramMessage(data: MessageEvent["data"]) {
+  if (typeof data !== "string") return null;
+
+  try {
+    return JSON.parse(data) as DeepgramResultMessage;
+  } catch {
+    return null;
+  }
+}
+
+function chooseMimeType() {
+  const candidates = [
+    "audio/webm;codecs=opus",
+    "audio/webm",
+    "audio/ogg;codecs=opus",
+  ];
+
+  return candidates.find((type) => MediaRecorder.isTypeSupported(type)) ?? "";
+}
+
+function createMediaRecorder(stream: MediaStream) {
+  const mimeType = chooseMimeType();
+  return mimeType ? new MediaRecorder(stream, { mimeType }) : new MediaRecorder(stream);
 }
 
 export interface DemoAdapterControls {

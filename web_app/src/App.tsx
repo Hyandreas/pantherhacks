@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
-  BrowserSpeechAdapter,
+  DeepgramCaptionAdapter,
   playScenario,
   simplifySentence,
   type DemoAdapterControls,
@@ -15,8 +15,10 @@ import type {
   SoundAlert,
 } from "./types";
 
-const speechAdapter = new BrowserSpeechAdapter();
+const speechAdapter = new DeepgramCaptionAdapter();
 const MAX_CAPTIONS = 200;
+const LUMEN_API_URL =
+  import.meta.env.VITE_LUMEN_API_URL ?? "http://127.0.0.1:8788";
 
 const speakerPalette: Record<string, string> = {
   live_a: "#98ffd8",
@@ -30,6 +32,15 @@ interface MissedMoment {
   beforeCaptionId?: string;
   recoveryCaptionId?: string;
   status: "waiting" | "captured";
+}
+
+interface SpeakerProfile {
+  id: string;
+  label: string;
+  source: string;
+  signature?: number[];
+  createdAt: string;
+  lastSeenAt: string;
 }
 
 function sanitizeText(text: string): string {
@@ -56,6 +67,14 @@ function App() {
   const [selectedCaptionId, setSelectedCaptionId] = useState<string | null>(null);
   const [flashCritical, setFlashCritical] = useState(false);
   const [micLevel, setMicLevel] = useState(0);
+  const [adminToken, setAdminToken] = useState(
+    () => window.localStorage.getItem("lumenAdminToken") ?? "",
+  );
+  const [adminTokenInput, setAdminTokenInput] = useState("");
+  const [speakerProfiles, setSpeakerProfiles] = useState<SpeakerProfile[]>([]);
+  const [speakerProfileStatus, setSpeakerProfileStatus] = useState(
+    "Sign in to edit AR speaker labels.",
+  );
   const demoControlsRef = useRef<DemoAdapterControls | null>(null);
   const micStreamRef = useRef<MediaStream | null>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
@@ -109,6 +128,15 @@ function App() {
   useEffect(() => {
     captionEndRef.current?.scrollIntoView({ behavior: "auto" });
   }, [visibleCaptions]);
+
+  useEffect(() => {
+    void refreshSpeakerProfiles();
+  }, []);
+
+  useEffect(() => {
+    if (!adminToken) return;
+    window.localStorage.setItem("lumenAdminToken", adminToken);
+  }, [adminToken]);
 
   function addSessionEvent(event: SessionEvent) {
     setEvents((current) => [...current, event]);
@@ -424,6 +452,75 @@ function App() {
 
     void audioContextRef.current?.close();
     audioContextRef.current = null;
+  }
+
+  async function refreshSpeakerProfiles() {
+    try {
+      const response = await fetch(`${LUMEN_API_URL}/speaker-profiles`);
+      const payload = (await response.json()) as { profiles?: SpeakerProfile[] };
+      setSpeakerProfiles(Array.isArray(payload.profiles) ? payload.profiles : []);
+    } catch {
+      setSpeakerProfileStatus("Speaker profile server is not reachable.");
+    }
+  }
+
+  async function signInSpeakerProfiles() {
+    try {
+      const response = await fetch(`${LUMEN_API_URL}/auth/login`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ token: adminTokenInput }),
+      });
+
+      if (!response.ok) {
+        setSpeakerProfileStatus("Wrong admin token.");
+        return;
+      }
+
+      setAdminToken(adminTokenInput);
+      setAdminTokenInput("");
+      setSpeakerProfileStatus("Signed in. Speaker labels can be edited.");
+      void refreshSpeakerProfiles();
+    } catch {
+      setSpeakerProfileStatus("Auth server is not reachable.");
+    }
+  }
+
+  async function saveSpeakerProfiles(nextProfiles: SpeakerProfile[]) {
+    try {
+      const response = await fetch(`${LUMEN_API_URL}/speaker-profiles`, {
+        method: "PUT",
+        headers: {
+          "Authorization": `Bearer ${adminToken}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ profiles: nextProfiles }),
+      });
+
+      if (!response.ok) {
+        setSpeakerProfileStatus("Sign in again to edit speaker labels.");
+        return;
+      }
+
+      const payload = (await response.json()) as { profiles?: SpeakerProfile[] };
+      setSpeakerProfiles(Array.isArray(payload.profiles) ? payload.profiles : nextProfiles);
+      setSpeakerProfileStatus("Speaker labels saved. AR will update automatically.");
+    } catch {
+      setSpeakerProfileStatus("Could not save speaker labels.");
+    }
+  }
+
+  function updateSpeakerProfileLabel(id: string, label: string) {
+    const nextProfiles = speakerProfiles.map((profile) =>
+      profile.id === id ? { ...profile, label, lastSeenAt: new Date().toISOString() } : profile,
+    );
+    setSpeakerProfiles(nextProfiles);
+  }
+
+  function deleteSpeakerProfile(id: string) {
+    const nextProfiles = speakerProfiles.filter((profile) => profile.id !== id);
+    setSpeakerProfiles(nextProfiles);
+    void saveSpeakerProfiles(nextProfiles);
   }
 
   const selectedCaption = captions.find((caption) => caption.id === selectedCaptionId) ?? null;
@@ -779,6 +876,74 @@ function App() {
                 </button>
               </div>
             ) : null}
+          </section>
+
+          <section className="control-card speaker-admin-card">
+            <p className="eyebrow">AR Speaker Profiles</p>
+            <h3>Shared labels</h3>
+            <p className="muted">{speakerProfileStatus}</p>
+
+            {!adminToken ? (
+              <div className="speaker-auth">
+                <input
+                  type="password"
+                  value={adminTokenInput}
+                  onChange={(event) => setAdminTokenInput(event.currentTarget.value)}
+                  placeholder="Admin token"
+                />
+                <button type="button" onClick={signInSpeakerProfiles}>
+                  Sign in
+                </button>
+              </div>
+            ) : (
+              <div className="speaker-admin-actions">
+                <button
+                  type="button"
+                  className="secondary"
+                  onClick={() => void saveSpeakerProfiles(speakerProfiles)}
+                >
+                  Save labels
+                </button>
+                <button
+                  type="button"
+                  className="ghost"
+                  onClick={() => {
+                    window.localStorage.removeItem("lumenAdminToken");
+                    setAdminToken("");
+                    setSpeakerProfileStatus("Signed out.");
+                  }}
+                >
+                  Sign out
+                </button>
+              </div>
+            )}
+
+            <div className="speaker-profile-list">
+              {speakerProfiles.length === 0 ? (
+                <p className="muted">AR will add speakers here after diarization detects them.</p>
+              ) : (
+                speakerProfiles.map((profile) => (
+                  <div key={profile.id} className="speaker-profile-row">
+                    <input
+                      value={profile.label}
+                      disabled={!adminToken}
+                      onChange={(event) =>
+                        updateSpeakerProfileLabel(profile.id, event.currentTarget.value)
+                      }
+                    />
+                    <span>{profile.source || "manual"}</span>
+                    <button
+                      type="button"
+                      className="ghost"
+                      disabled={!adminToken}
+                      onClick={() => deleteSpeakerProfile(profile.id)}
+                    >
+                      Delete
+                    </button>
+                  </div>
+                ))
+              )}
+            </div>
           </section>
         </aside>
       </main>

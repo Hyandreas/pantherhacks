@@ -1,0 +1,79 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; media-src 'self' blob:; img-src 'self' data:; connect-src 'self' http://127.0.0.1:8788 ws://127.0.0.1:8788;"
+    />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Lumen Webcam Widget</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <main class="webcam-shell">
+      <div class="drag-region" aria-hidden="true"></div>
+      <button
+        id="closeButton"
+        class="close-button"
+        type="button"
+        aria-label="Close"
+      >
+        x
+      </button>
+      <video id="cameraFeed" autoplay muted playsinline></video>
+      <section
+        id="captionOverlay"
+        class="caption-overlay"
+        aria-live="polite"
+        hidden
+      >
+        <div class="caption-status">
+          <span class="live-dot"></span>
+          <span id="captionStatus">Live captions</span>
+        </div>
+        <p id="captionText">Speak near the microphone.</p>
+        <div id="confidenceBar" class="confidence-bar" aria-hidden="true">
+          <span></span>
+        </div>
+      </section>
+      <section id="speakerPrompt" class="speaker-prompt" hidden>
+        <button
+          id="speakerPromptButton"
+          class="speaker-prompt-button"
+          type="button"
+        >
+          <span>New voice detected</span>
+          <strong id="speakerPromptName">Rename speaker</strong>
+        </button>
+        <form id="speakerPromptForm" class="speaker-prompt-form" hidden>
+          <label for="speakerNameInput">Speaker name</label>
+          <div>
+            <input
+              id="speakerNameInput"
+              type="text"
+              maxlength="32"
+              autocomplete="off"
+              placeholder="Mom, Doctor, Teammate"
+            />
+            <button type="submit">Save</button>
+          </div>
+          <button id="speakerLaterButton" class="speaker-later" type="button">
+            Later
+          </button>
+        </form>
+      </section>
+      <div id="handStatus" class="hand-status" aria-live="polite">
+        Hand tracking: starting
+      </div>
+      <div id="handCursor" class="hand-cursor" hidden aria-hidden="true"></div>
+      <div id="cameraError" class="camera-error" hidden>
+        Camera unavailable. Check permissions and restart the widget.
+      </div>
+    </main>
+
+    <script src="./node_modules/@mediapipe/hands/hands.js"></script>
+    <script src="./node_modules/@mediapipe/camera_utils/camera_utils.js"></script>
+    <script src="./renderer.js"></script>
+  </body>
+</html>
