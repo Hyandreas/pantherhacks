@@ -32,13 +32,14 @@ function App() {
   const [sessionMode, setSessionMode] = useState<SessionMode>("bridge");
   const [selectedScenarioId, setSelectedScenarioId] = useState(scenarios[0].id);
   const [captions, setCaptions] = useState<CaptionSegment[]>([]);
-  const [events, setEvents] = useState<SessionEvent[]>([]);
+  const [, setEvents] = useState<SessionEvent[]>([]);
   const [soundAlerts, setSoundAlerts] = useState<SoundAlert[]>([]);
   const [listening, setListening] = useState(false);
   const [plainLanguageEnabled, setPlainLanguageEnabled] = useState(true);
   const [focusEnabled, setFocusEnabled] = useState(false);
   const [showDemoOptions, setShowDemoOptions] = useState(false);
   const [saved, setSaved] = useState(false);
+  const [hearingPrompt, setHearingPrompt] = useState<string | null>(null);
   const [statusMessage, setStatusMessage] = useState(
     "Consent-first bridge mode is ready. Start live captions or run a scenario.",
   );
@@ -78,6 +79,9 @@ function App() {
       .filter((entity, index, list) => list.indexOf(entity) === index)
       .slice(0, 5);
   }, [captions]);
+
+  const latestCaption = visibleCaptions[visibleCaptions.length - 1] ?? null;
+  const confidenceState = latestCaption ? confidenceLabel(latestCaption.confidence) : null;
 
   useEffect(() => {
     return () => {
@@ -245,6 +249,7 @@ function App() {
     setEvents([]);
     setSoundAlerts([]);
     setSelectedCaptionId(null);
+    setHearingPrompt(null);
     if (clearSaved) {
       setSaved(false);
     }
@@ -284,6 +289,11 @@ function App() {
     const utterance = new SpeechSynthesisUtterance(caption.text);
     utterance.rate = 0.9;
     window.speechSynthesis.speak(utterance);
+  }
+
+  function showHearingPrompt(message: string) {
+    setHearingPrompt(message);
+    setStatusMessage(`Showing request: ${message}`);
   }
 
   async function startVolumeMeter() {
@@ -350,25 +360,11 @@ function App() {
       <header className="hero">
         <div className="hero-copy">
           <p className="eyebrow">Lumen</p>
-          <h1>Making spoken language visible.</h1>
+          <h1>Live captions for real conversations.</h1>
           <p className="hero-text">
-            A privacy-first accessibility assistant for hard-of-hearing,
-            late-deafened, and speech-processing-challenged adults.
+            Start captions, keep the original words visible, and ask for repair
+            when the transcript is uncertain.
           </p>
-        </div>
-        <div className="hero-metrics">
-          <div className="metric-card">
-            <span>Core insight</span>
-            <strong>Bridge Mode</strong>
-          </div>
-          <div className="metric-card">
-            <span>Hackathon surface</span>
-            <strong>Web demo</strong>
-          </div>
-          <div className="metric-card">
-            <span>Trust rule</span>
-            <strong>Visible consent</strong>
-          </div>
         </div>
       </header>
 
@@ -376,8 +372,8 @@ function App() {
         <section className="bridge-panel">
           <div className="section-head">
             <div>
-              <p className="eyebrow">Bridge Mode</p>
-              <h2>Phone-between-you conversation design</h2>
+              <p className="eyebrow">Big Caption Mode</p>
+              <h2>Follow the words first</h2>
             </div>
             <span className={`status-pill ${listening ? "live" : ""}`}>
               {listening ? (
@@ -393,17 +389,64 @@ function App() {
             <div className="device-side device-side-user">
               <div className="panel-label">User side</div>
               <div className="bridge-stack">
-                <div className="trust-banner">
+                <div className="trust-banner" aria-live="polite">
                   <span className="dot" />
                   {statusMessage}
+                </div>
+                <section className="big-caption-stage" aria-live="polite" aria-label="Current caption">
+                  {latestCaption ? (
+                    <>
+                      <div className="big-caption-meta">
+                        <span>{latestCaption.speakerLabel}</span>
+                        <span className={`confidence-badge ${confidenceState?.tone ?? ""}`}>
+                          {confidenceState?.label}
+                        </span>
+                      </div>
+                      <p>{latestCaption.text}</p>
+                      {latestCaption.plainLanguageText ? (
+                        <small>Plain language: {latestCaption.plainLanguageText}</small>
+                      ) : null}
+                    </>
+                  ) : (
+                    <>
+                      <div className="big-caption-meta">
+                        <span>Ready</span>
+                        <span className="confidence-badge">No speech yet</span>
+                      </div>
+                      <p>Press Start live captions and place the phone near the speaker.</p>
+                    </>
+                  )}
+                </section>
+                <div className="repair-actions">
+                  <button
+                    type="button"
+                    className="repeat-button"
+                    onClick={() => showHearingPrompt("Please repeat that more slowly.")}
+                  >
+                    Please repeat
+                  </button>
+                  <button
+                    type="button"
+                    className="secondary"
+                    onClick={() => showHearingPrompt("Please face me while speaking.")}
+                  >
+                    Please face me
+                  </button>
+                  <button
+                    type="button"
+                    className="secondary"
+                    onClick={() => showHearingPrompt("One person at a time, please.")}
+                  >
+                    One at a time
+                  </button>
                 </div>
                 <div className="caption-stream">
                   {visibleCaptions.length === 0 ? (
                     <div className="empty-state">
                       <strong>Nothing captured yet.</strong>
                       <p>
-                        Start live captions or run a scenario to see confidence,
-                        speaker labels, focus mode, memory, and plain language.
+                        Start live captions to see the full transcript history.
+                        Use the repeat button if anything is unclear.
                       </p>
                     </div>
                   ) : (
@@ -463,29 +506,35 @@ function App() {
 
             <div className="device-side device-side-hearing">
               <div className="panel-label">Hearing side</div>
-              <div className="consent-card">
-                <p className="eyebrow">Accessibility Notice</p>
-                <h3>This conversation is being captioned for accessibility.</h3>
-                <p>
-                  Captions are visible to both sides. Audio is not hidden, and
-                  session memory only persists if the user explicitly saves it.
-                </p>
+              <div className="consent-card hearing-card">
+                <p className="eyebrow">For the speaker</p>
+                {hearingPrompt ? (
+                  <>
+                    <h3>{hearingPrompt}</h3>
+                    <p>Thanks. Short pauses and clear speech help captions stay reliable.</p>
+                  </>
+                ) : (
+                  <>
+                    <h3>I use live captions to understand speech.</h3>
+                    <p>Please speak normally and face me when you can. Audio is not secretly recorded; notes are only saved if I choose to save them.</p>
+                  </>
+                )}
                 <div className="consent-grid">
                   <div>
-                    <span>Audio</span>
-                    <strong>Visible in-session only</strong>
+                    <span>Mic</span>
+                    <strong>{listening ? "Listening now" : "Off"}</strong>
                   </div>
                   <div>
-                    <span>Cloud</span>
-                    <strong>Text-only plain language</strong>
+                    <span>Saving</span>
+                    <strong>{saved ? "Saved by user" : "Not saved"}</strong>
                   </div>
                   <div>
-                    <span>Retention</span>
-                    <strong>Ends unless saved</strong>
+                    <span>Best help</span>
+                    <strong>Face the phone</strong>
                   </div>
                   <div>
-                    <span>Fallback</span>
-                    <strong>Scenario demo mode</strong>
+                    <span>Repair</span>
+                    <strong>Repeat if asked</strong>
                   </div>
                 </div>
               </div>
@@ -627,32 +676,6 @@ function App() {
               </div>
             ) : null}
           </section>
-
-          <section className="control-card architecture-card">
-            <p className="eyebrow">Feature Coverage</p>
-            <ul>
-              <li>Live captions with confidence</li>
-              <li>Bridge Mode consent surface</li>
-              <li>Speaker-labeled caption bubbles</li>
-              <li>Plain language layer</li>
-              <li>Sound event detection</li>
-              <li>Conversation memory + replay</li>
-              <li>Focus mode</li>
-            </ul>
-            <div className="event-log">
-              <p className="eyebrow">Session Event Log</p>
-              {events.length === 0 ? (
-                <p className="muted">Consent, caption, summary, and sound events appear here.</p>
-              ) : (
-                events.slice(-5).reverse().map((event, index) => (
-                  <div key={`${event.timestamp}-${event.type}-${index}`} className="event-row">
-                    <strong>{event.type}</strong>
-                    <span>{event.timestamp}</span>
-                  </div>
-                ))
-              )}
-            </div>
-          </section>
         </aside>
       </main>
     </div>
@@ -678,6 +701,12 @@ function isFocusedText(entities: string[], text: string) {
     entities.length > 0 ||
     /\b(agree|due|reserve|schedule|take|start|leave|count|message)\b/i.test(text)
   );
+}
+
+function confidenceLabel(confidence: number) {
+  if (confidence >= 0.88) return { label: "High confidence", tone: "good" };
+  if (confidence >= 0.72) return { label: "Check wording", tone: "warn" };
+  return { label: "Uncertain", tone: "danger" };
 }
 
 export default App;
