@@ -13,7 +13,7 @@ const securityHeaders = {
     "font-src https://fonts.gstatic.com",
     "img-src 'self' data:",
     "connect-src 'self' http://127.0.0.1:* ws://127.0.0.1:*",
-    "media-src 'self'",
+    "media-src 'self' blob:",
     "object-src 'none'",
     "base-uri 'self'",
   ].join("; "),

@@ -648,6 +648,87 @@ button.ghost {
   color: #d7ebe2;
 }
 
+.speaker-admin-actions {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 10px;
+  margin-top: 14px;
+}
+
+.speaker-profile-row input {
+  min-width: 0;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--text);
+  font: inherit;
+  padding: 0 12px;
+}
+
+.speaker-profile-list {
+  display: grid;
+  gap: 10px;
+  margin-top: 14px;
+}
+
+.speaker-profile-row {
+  display: grid;
+  grid-template-columns: 1fr 0.8fr 1.3fr auto auto;
+  gap: 8px;
+  align-items: center;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 16px;
+  padding: 10px;
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.speaker-profile-row input {
+  min-height: 42px;
+}
+
+.speaker-assignment-card {
+  display: grid;
+  gap: 8px;
+  margin-top: 14px;
+  border: 1px solid rgba(255, 209, 139, 0.28);
+  border-radius: 16px;
+  padding: 12px;
+  background: rgba(255, 209, 139, 0.08);
+}
+
+.speaker-assignment-card p {
+  margin: 0;
+}
+
+.speaker-assignment-actions {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: center;
+}
+
+.speaker-assignment-actions select {
+  min-width: 0;
+  min-height: 42px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--text);
+  font: inherit;
+  padding: 0 12px;
+}
+
+.speaker-profile-row span {
+  color: var(--muted);
+  font-size: 0.78rem;
+  white-space: nowrap;
+}
+
+.speaker-profile-row button:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+
 .missed-summary {
   margin-top: 16px;
   padding-top: 14px;
@@ -734,7 +815,9 @@ button.ghost {
   .hero-metrics,
   .button-grid,
   .repair-actions,
-  .consent-grid {
+  .consent-grid,
+  .speaker-assignment-actions,
+  .speaker-profile-row {
     grid-template-columns: 1fr;
   }
 
