@@ -346,8 +346,17 @@ button {
   gap: 10px;
 }
 
-.repeat-button {
+.missed-button {
   background: linear-gradient(135deg, #ffd18b, #98ffd8);
+}
+
+.missed-status {
+  border: 1px solid rgba(255, 209, 139, 0.26);
+  border-radius: 16px;
+  padding: 12px 14px;
+  background: rgba(255, 209, 139, 0.1);
+  color: #ffe7be;
+  font-weight: 800;
 }
 
 .caption-card,
@@ -401,6 +410,26 @@ button {
   margin: 0;
   font-size: 1rem;
   line-height: 1.55;
+}
+
+.moment-marker {
+  display: inline-flex;
+  width: fit-content;
+  margin-bottom: 8px;
+  border-radius: 999px;
+  padding: 6px 10px;
+  font-size: 0.76rem;
+  font-weight: 900;
+}
+
+.moment-marker.missed {
+  background: rgba(255, 209, 139, 0.16);
+  color: #ffe7be;
+}
+
+.moment-marker.recovery {
+  background: rgba(152, 255, 216, 0.14);
+  color: #d9fff3;
 }
 
 .plain-language {
@@ -617,6 +646,12 @@ button.ghost {
 .memory-card p,
 .architecture-card li {
   color: #d7ebe2;
+}
+
+.missed-summary {
+  margin-top: 16px;
+  padding-top: 14px;
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
 }
 
 .architecture-card ul {

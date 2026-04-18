@@ -47,6 +47,8 @@ export interface CaptionSegment {
   plainLanguageText?: string;
   entities?: string[];
   isFocused: boolean;
+  missedMomentId?: string;
+  recoveryForId?: string;
 }
 
 export interface SessionEvent {

@@ -24,6 +24,14 @@ const speakerPalette: Record<string, string> = {
   live_c: "#d6c2ff",
 };
 
+interface MissedMoment {
+  id: string;
+  timestamp: string;
+  beforeCaptionId?: string;
+  recoveryCaptionId?: string;
+  status: "waiting" | "captured";
+}
+
 function sanitizeText(text: string): string {
   return text.slice(0, 500).replace(/[<>]/g, "");
 }
@@ -40,6 +48,8 @@ function App() {
   const [showDemoOptions, setShowDemoOptions] = useState(false);
   const [saved, setSaved] = useState(false);
   const [hearingPrompt, setHearingPrompt] = useState<string | null>(null);
+  const [missedMoments, setMissedMoments] = useState<MissedMoment[]>([]);
+  const [pendingMissedMomentId, setPendingMissedMomentId] = useState<string | null>(null);
   const [statusMessage, setStatusMessage] = useState(
     "Consent-first bridge mode is ready. Start live captions or run a scenario.",
   );
@@ -50,7 +60,9 @@ function App() {
   const micStreamRef = useRef<MediaStream | null>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
   const volumeFrameRef = useRef<number | null>(null);
-  const liveTranscriptCache = useRef<Record<number, string>>({});
+  const liveTranscriptCache = useRef<Record<string, string>>({});
+  const pendingMissedMomentIdRef = useRef<string | null>(null);
+  const pendingMissedBeforeCaptionIdRef = useRef<string | null>(null);
   const captionEndRef = useRef<HTMLDivElement>(null);
 
   const selectedScenario = useMemo(
@@ -82,6 +94,9 @@ function App() {
 
   const latestCaption = visibleCaptions[visibleCaptions.length - 1] ?? null;
   const confidenceState = latestCaption ? confidenceLabel(latestCaption.confidence) : null;
+  const pendingMissedMoment = missedMoments.find(
+    (moment) => moment.id === pendingMissedMomentId,
+  );
 
   useEffect(() => {
     return () => {
@@ -137,9 +152,13 @@ function App() {
       plainLanguageText: plainLanguageEnabled ? event.plainLanguageText : undefined,
       entities: event.entities ?? extractEntities(event.text),
       isFocused: isFocusedText(event.entities ?? extractEntities(event.text), event.text),
+      recoveryForId: pendingMissedMomentIdRef.current ?? undefined,
     };
 
     setCaptions((current) => [...current, caption]);
+    if (pendingMissedMomentIdRef.current) {
+      captureMissedMomentRecovery(pendingMissedMomentIdRef.current, caption.id);
+    }
     addSessionEvent({
       type: "caption",
       timestamp: caption.timestamp,
@@ -185,10 +204,17 @@ function App() {
       async (result) => {
         const rawText = sanitizeText(result.text);
         if (!rawText) return;
-        if (liveTranscriptCache.current[result.resultIndex] === rawText) return;
-        liveTranscriptCache.current[result.resultIndex] = rawText;
 
-        const id = `live-${result.resultIndex}`;
+        const pendingRecoveryId = pendingMissedMomentIdRef.current;
+        const cacheKey = `${result.resultIndex}:${pendingRecoveryId ?? "normal"}`;
+        if (liveTranscriptCache.current[cacheKey] === rawText) return;
+        liveTranscriptCache.current[cacheKey] = rawText;
+
+        const baseId = `live-${result.resultIndex}`;
+        const id =
+          pendingRecoveryId && pendingMissedBeforeCaptionIdRef.current === baseId
+            ? `${baseId}-repeat-${pendingRecoveryId}`
+            : baseId;
         const entities = extractEntities(rawText);
         const caption: CaptionSegment = {
           id,
@@ -199,6 +225,7 @@ function App() {
           timestamp: timeLabel(),
           entities,
           isFocused: isFocusedText(entities, rawText),
+          recoveryForId: pendingRecoveryId ?? undefined,
         };
 
         setCaptions((current) => {
@@ -222,6 +249,9 @@ function App() {
         }
 
         if (result.isFinal) {
+          if (pendingRecoveryId) {
+            captureMissedMomentRecovery(pendingRecoveryId, id);
+          }
           addSessionEvent({
             type: "caption",
             timestamp: caption.timestamp,
@@ -250,6 +280,10 @@ function App() {
     setSoundAlerts([]);
     setSelectedCaptionId(null);
     setHearingPrompt(null);
+    setMissedMoments([]);
+    setPendingMissedMomentId(null);
+    pendingMissedMomentIdRef.current = null;
+    pendingMissedBeforeCaptionIdRef.current = null;
     if (clearSaved) {
       setSaved(false);
     }
@@ -261,6 +295,8 @@ function App() {
     stopVolumeMeter();
     demoControlsRef.current = null;
     liveTranscriptCache.current = {};
+    pendingMissedMomentIdRef.current = null;
+    pendingMissedBeforeCaptionIdRef.current = null;
     setListening(false);
     setMicLevel(0);
     if (!saved) {
@@ -294,6 +330,50 @@ function App() {
   function showHearingPrompt(message: string) {
     setHearingPrompt(message);
     setStatusMessage(`Showing request: ${message}`);
+  }
+
+  function markMissedMoment() {
+    const momentId = `missed-${Date.now()}`;
+    const beforeCaption = captions[captions.length - 1];
+
+    setMissedMoments((current) => [
+      ...current,
+      {
+        id: momentId,
+        timestamp: timeLabel(),
+        beforeCaptionId: beforeCaption?.id,
+        status: "waiting",
+      },
+    ]);
+
+    if (beforeCaption) {
+      setCaptions((current) =>
+        current.map((caption) =>
+          caption.id === beforeCaption.id
+            ? { ...caption, missedMomentId: momentId }
+            : caption,
+        ),
+      );
+    }
+
+    setPendingMissedMomentId(momentId);
+    pendingMissedMomentIdRef.current = momentId;
+    pendingMissedBeforeCaptionIdRef.current = beforeCaption?.id ?? null;
+    showHearingPrompt("Please repeat the last part. I missed it.");
+  }
+
+  function captureMissedMomentRecovery(momentId: string, captionId: string) {
+    setMissedMoments((current) =>
+      current.map((moment) =>
+        moment.id === momentId
+          ? { ...moment, recoveryCaptionId: captionId, status: "captured" }
+          : moment,
+      ),
+    );
+    setPendingMissedMomentId(null);
+    pendingMissedMomentIdRef.current = null;
+    pendingMissedBeforeCaptionIdRef.current = null;
+    setStatusMessage("Repeat captured and linked to the missed moment.");
   }
 
   async function startVolumeMeter() {
@@ -420,10 +500,17 @@ function App() {
                 <div className="repair-actions">
                   <button
                     type="button"
-                    className="repeat-button"
+                    className="missed-button"
+                    onClick={markMissedMoment}
+                  >
+                    I missed that
+                  </button>
+                  <button
+                    type="button"
+                    className="secondary"
                     onClick={() => showHearingPrompt("Please repeat that more slowly.")}
                   >
-                    Please repeat
+                    Repeat slowly
                   </button>
                   <button
                     type="button"
@@ -432,14 +519,12 @@ function App() {
                   >
                     Please face me
                   </button>
-                  <button
-                    type="button"
-                    className="secondary"
-                    onClick={() => showHearingPrompt("One person at a time, please.")}
-                  >
-                    One at a time
-                  </button>
                 </div>
+                {pendingMissedMoment ? (
+                  <div className="missed-status" aria-live="polite">
+                    Waiting for the speaker to repeat the last part.
+                  </div>
+                ) : null}
                 <div className="caption-stream">
                   {visibleCaptions.length === 0 ? (
                     <div className="empty-state">
@@ -470,6 +555,16 @@ function App() {
                           <span>{caption.timestamp}</span>
                           <span>{Math.round(caption.confidence * 100)}%</span>
                         </div>
+                        {caption.missedMomentId ? (
+                          <div className="moment-marker missed">
+                            Missed moment marked here
+                          </div>
+                        ) : null}
+                        {caption.recoveryForId ? (
+                          <div className="moment-marker recovery">
+                            Repeat attempt captured
+                          </div>
+                        ) : null}
                         <p
                           className="caption-text"
                           style={{ opacity: 0.45 + caption.confidence * 0.55 }}
@@ -661,6 +756,15 @@ function App() {
                 ))
               )}
             </div>
+            {missedMoments.length ? (
+              <div className="missed-summary">
+                <h3>Missed moments</h3>
+                <p>
+                  {missedMoments.filter((moment) => moment.status === "captured").length} of{" "}
+                  {missedMoments.length} repeat attempts captured.
+                </p>
+              </div>
+            ) : null}
             {selectedCaption ? (
               <div className="replay-card">
                 <p className="eyebrow">Tap-to-replay</p>
