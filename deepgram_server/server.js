@@ -11,6 +11,7 @@ loadEnvFile(path.join(dirname, ".env"));
 const PORT = Number(process.env.PORT ?? 8788);
 const DEEPGRAM_API_KEY = process.env.DEEPGRAM_API_KEY;
 const DEEPGRAM_MODEL = process.env.DEEPGRAM_MODEL ?? "nova-3";
+const LIBRETRANSLATE_URL = process.env.LIBRETRANSLATE_URL;
 const PROFILES_PATH = path.join(dirname, "speaker_profiles.json");
 const MAX_FRAME_BYTES = 1024 * 1024;
 const SOCKET_OPEN = 1;
@@ -42,6 +43,13 @@ async function handleHttpRequest(req, res) {
   if (req.method === "POST" && req.url === "/auth/login") {
     await readJsonBody(req);
     writeJson(res, 200, { ok: true });
+    return;
+  }
+
+  if (req.method === "POST" && req.url === "/translate") {
+    const payload = await readJsonBody(req);
+    const result = await translateText(payload);
+    writeJson(res, result.ok ? 200 : 502, result);
     return;
   }
 
@@ -478,8 +486,82 @@ function isLocalOrigin(origin) {
 }
 
 function writeJson(res, status, payload) {
-  res.writeHead(status, { "Content-Type": "application/json" });
+  res.writeHead(status, { "Content-Type": "application/json; charset=utf-8" });
   res.end(JSON.stringify(payload));
+}
+
+async function translateText(payload) {
+  const text = String(payload?.text ?? "").trim().slice(0, 1000);
+  const source = normalizeLanguageCode(payload?.source);
+  const target = normalizeLanguageCode(payload?.target);
+
+  if (!text) {
+    return { ok: true, translatedText: "", provider: "none" };
+  }
+
+  if (!source || !target) {
+    return { ok: false, error: "Unsupported translation language." };
+  }
+
+  if (source === target) {
+    return { ok: true, translatedText: text, provider: "none" };
+  }
+
+  if (LIBRETRANSLATE_URL) {
+    const libreResult = await translateWithLibreTranslate(text, source, target);
+    if (libreResult.ok) return libreResult;
+  }
+
+  return translateWithMyMemory(text, source, target);
+}
+
+async function translateWithLibreTranslate(text, source, target) {
+  try {
+    const response = await fetch(`${LIBRETRANSLATE_URL.replace(/\/$/, "")}/translate`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        q: text,
+        source,
+        target,
+        format: "text",
+      }),
+    });
+    const payload = await response.json();
+    const translatedText = String(payload?.translatedText ?? "").trim();
+    if (!response.ok || !translatedText) {
+      return { ok: false, error: "LibreTranslate failed." };
+    }
+    return { ok: true, translatedText, provider: "libretranslate" };
+  } catch {
+    return { ok: false, error: "LibreTranslate unavailable." };
+  }
+}
+
+async function translateWithMyMemory(text, source, target) {
+  try {
+    const url = new URL("https://api.mymemory.translated.net/get");
+    url.searchParams.set("q", text);
+    url.searchParams.set("langpair", `${source}|${target}`);
+
+    const response = await fetch(url, {
+      headers: { "User-Agent": "Lumen local caption proxy" },
+    });
+    const payload = await response.json();
+    const translatedText = String(payload?.responseData?.translatedText ?? "").trim();
+    if (!response.ok || !translatedText) {
+      return { ok: false, error: "Translation provider failed." };
+    }
+    return { ok: true, translatedText, provider: "mymemory" };
+  } catch {
+    return { ok: false, error: "Translation provider unavailable." };
+  }
+}
+
+function normalizeLanguageCode(value) {
+  const supported = new Set(["en", "es", "fr", "zh-CN", "hi", "ar", "pt", "ko", "ja"]);
+  const code = String(value ?? "").trim();
+  return supported.has(code) ? code : "";
 }
 
 function readJsonBody(req) {

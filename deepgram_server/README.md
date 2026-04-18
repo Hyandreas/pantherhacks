@@ -14,6 +14,8 @@ Create `deepgram_server/.env`:
 DEEPGRAM_API_KEY=your_deepgram_api_key_here
 DEEPGRAM_MODEL=nova-3
 PORT=8788
+# Optional. If omitted, /translate uses MyMemory's public translation API.
+# LIBRETRANSLATE_URL=http://127.0.0.1:5000
 ```
 
 ## Run
@@ -31,5 +33,6 @@ The proxy exposes:
 - `GET /speaker-profiles`
 - `POST /speaker-profiles`
 - `PUT /speaker-profiles`
+- `POST /translate`
 
 Start this server before running `web_app` or `ar_app`.

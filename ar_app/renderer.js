@@ -1,5 +1,6 @@
 const DEEPGRAM_PROXY_URL = "ws://127.0.0.1:8788/captions";
 const SPEAKER_PROFILES_URL = "http://127.0.0.1:8788/speaker-profiles";
+const TRANSLATE_URL = "http://127.0.0.1:8788/translate";
 const MEDIAPIPE_HANDS_BASE_URL = new URL(
   "./node_modules/@mediapipe/hands/",
   window.location.href,
@@ -54,6 +55,7 @@ let lastTranscript = "";
 let currentSpeakerId = null;
 let infoPanelSpeakerId = null;
 let selectedSpeakerProfileId = "";
+let captionSequence = 0;
 let pendingSpeakerId = null;
 let pendingMatchProfileId = null;
 let handTracker = null;
@@ -82,7 +84,7 @@ const languages = [
   { code: "en", label: "English" },
   { code: "es", label: "Spanish" },
   { code: "fr", label: "French" },
-  { code: "zh", label: "Chinese" },
+  { code: "zh-CN", label: "Chinese" },
   { code: "hi", label: "Hindi" },
   { code: "ar", label: "Arabic" },
   { code: "pt", label: "Portuguese" },
@@ -91,6 +93,7 @@ const languages = [
 ];
 let spokenLanguageCode = "en";
 let captionLanguageCode = "en";
+const translationCache = new Map();
 
 async function startCamera() {
   try {
@@ -165,11 +168,13 @@ async function startDeepgramCaptions() {
 
       lastTranscript = text;
       captionOverlay.hidden = false;
+      const nextCaptionSequence = captionSequence + 1;
+      captionSequence = nextCaptionSequence;
       captionStatus.textContent =
         message.is_final || message.speech_final
           ? `${speakerLabel} - Deepgram captions`
           : `${speakerLabel} - Listening`;
-      captionText.textContent = text;
+      showCaptionText(text, speakerLabel, nextCaptionSequence);
       whoIsThisButton.hidden = speakerId === null;
       confidenceBar.style.width = `${Math.round((alternative.confidence || 0.82) * 100)}%`;
     };
@@ -195,6 +200,58 @@ function showCaptionError(message) {
   captionStatus.textContent = "Caption setup needed";
   captionText.textContent = message;
   confidenceBar.style.width = "0%";
+}
+
+async function showCaptionText(text, speakerLabel, sequence) {
+  if (spokenLanguageCode === captionLanguageCode) {
+    captionText.textContent = text;
+    return;
+  }
+
+  const sourceLanguage = findLanguage(spokenLanguageCode);
+  const targetLanguage = findLanguage(captionLanguageCode);
+  captionText.textContent = text;
+  captionStatus.textContent = `${speakerLabel} - translating ${sourceLanguage.short} -> ${targetLanguage.short}`;
+
+  const translatedText = await translateCaption(text);
+  if (sequence !== captionSequence) return;
+
+  if (translatedText) {
+    captionText.textContent = translatedText;
+    captionStatus.textContent = `${speakerLabel} - translated ${sourceLanguage.short} -> ${targetLanguage.short}`;
+  } else {
+    captionStatus.textContent = `${speakerLabel} - translation unavailable`;
+  }
+}
+
+async function translateCaption(text) {
+  const cacheKey = `${spokenLanguageCode}:${captionLanguageCode}:${text}`;
+  if (translationCache.has(cacheKey)) {
+    return translationCache.get(cacheKey);
+  }
+
+  try {
+    const response = await fetch(TRANSLATE_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        text,
+        source: spokenLanguageCode,
+        target: captionLanguageCode,
+      }),
+    });
+    const payload = await response.json();
+    const translatedText =
+      response.ok && payload?.ok
+        ? String(payload.translatedText ?? "").trim()
+        : "";
+    if (translatedText) {
+      translationCache.set(cacheKey, translatedText);
+    }
+    return translatedText;
+  } catch {
+    return "";
+  }
 }
 
 function startHandTracking() {
@@ -966,6 +1023,7 @@ function selectLanguage(type, code) {
 
   updateTranslateLabels();
   closeLanguageLists();
+  lastTranscript = "";
 }
 
 function updateTranslateLabels() {
