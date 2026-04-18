@@ -242,6 +242,7 @@ video {
 }
 
 .hand-status {
+  display: none;
   position: absolute;
   top: 14px;
   left: 14px;

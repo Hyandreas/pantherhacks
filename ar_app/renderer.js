@@ -1,6 +1,9 @@
 const DEEPGRAM_PROXY_URL = "ws://127.0.0.1:8788/captions";
 const SPEAKER_PROFILES_URL = "http://127.0.0.1:8788/speaker-profiles";
-const MEDIAPIPE_HANDS_CDN = "https://cdn.jsdelivr.net/npm/@mediapipe/hands";
+const MEDIAPIPE_HANDS_BASE_URL = new URL(
+  "./node_modules/@mediapipe/hands/",
+  window.location.href,
+).toString();
 const CHUNK_MS = 250;
 
 const video = document.querySelector("#cameraFeed");
@@ -166,7 +169,7 @@ function startHandTracking() {
   handStatus.textContent = "Hand tracking: loading model...";
 
   const hands = new window.Hands({
-    locateFile: (file) => `${MEDIAPIPE_HANDS_CDN}/${file}`,
+    locateFile: (file) => `${MEDIAPIPE_HANDS_BASE_URL}${file}`,
   });
 
   hands.setOptions({
