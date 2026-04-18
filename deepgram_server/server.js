@@ -11,13 +11,12 @@ loadEnvFile(path.join(dirname, ".env"));
 const PORT = Number(process.env.PORT ?? 8788);
 const DEEPGRAM_API_KEY = process.env.DEEPGRAM_API_KEY;
 const DEEPGRAM_MODEL = process.env.DEEPGRAM_MODEL ?? "nova-3";
-const LUMEN_ADMIN_TOKEN = process.env.LUMEN_ADMIN_TOKEN ?? "lumen-local";
 const PROFILES_PATH = path.join(dirname, "speaker_profiles.json");
 const MAX_FRAME_BYTES = 1024 * 1024;
 const SOCKET_OPEN = 1;
 
 const server = http.createServer((req, res) => {
-  setCorsHeaders(res);
+  setCorsHeaders(req, res);
 
   void handleHttpRequest(req, res);
 });
@@ -35,16 +34,14 @@ async function handleHttpRequest(req, res) {
       provider: "deepgram",
       model: DEEPGRAM_MODEL,
       hasApiKey: Boolean(DEEPGRAM_API_KEY),
-      authConfigured: Boolean(LUMEN_ADMIN_TOKEN),
+      profileEditingRequiresAuth: false,
     });
     return;
   }
 
   if (req.method === "POST" && req.url === "/auth/login") {
-    const payload = await readJsonBody(req);
-    writeJson(res, payload?.token === LUMEN_ADMIN_TOKEN ? 200 : 401, {
-      ok: payload?.token === LUMEN_ADMIN_TOKEN,
-    });
+    await readJsonBody(req);
+    writeJson(res, 200, { ok: true });
     return;
   }
 
@@ -54,11 +51,6 @@ async function handleHttpRequest(req, res) {
   }
 
   if (req.method === "PUT" && req.url === "/speaker-profiles") {
-    if (!isAuthorized(req)) {
-      writeJson(res, 401, { error: "Unauthorized." });
-      return;
-    }
-
     const payload = await readJsonBody(req);
     const profiles = Array.isArray(payload?.profiles)
       ? sanitizeProfiles(payload.profiles)
@@ -78,7 +70,7 @@ async function handleHttpRequest(req, res) {
     }
 
     const profiles = readSpeakerProfiles();
-    const existingIndex = profiles.findIndex((item) => item.id === profile.id);
+    const existingIndex = profiles.findIndex((item) => isSameProfile(item, profile));
     const nextProfiles =
       existingIndex >= 0
         ? profiles.map((item, index) => (index === existingIndex ? profile : item))
@@ -456,19 +448,38 @@ function sendClientError(socket, message) {
   writeFrame(socket, 1, Buffer.from(JSON.stringify({ type: "Error", error: message })));
 }
 
-function setCorsHeaders(res) {
-  res.setHeader("Access-Control-Allow-Origin", "*");
-  res.setHeader("Access-Control-Allow-Methods", "GET,OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+function setCorsHeaders(req, res) {
+  const origin = req.headers.origin;
+
+  if (isLocalOrigin(origin)) {
+    res.setHeader("Access-Control-Allow-Origin", origin);
+    res.setHeader("Vary", "Origin");
+  } else if (!origin || origin === "file://") {
+    res.setHeader("Access-Control-Allow-Origin", "*");
+  }
+
+  res.setHeader("Access-Control-Allow-Methods", "GET,POST,PUT,OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Authorization,Content-Type");
+  res.setHeader("Access-Control-Max-Age", "600");
+}
+
+function isLocalOrigin(origin) {
+  if (typeof origin !== "string") return false;
+
+  try {
+    const url = new URL(origin);
+    return (
+      (url.protocol === "http:" || url.protocol === "https:") &&
+      (url.hostname === "127.0.0.1" || url.hostname === "localhost")
+    );
+  } catch {
+    return false;
+  }
 }
 
 function writeJson(res, status, payload) {
   res.writeHead(status, { "Content-Type": "application/json" });
   res.end(JSON.stringify(payload));
-}
-
-function isAuthorized(req) {
-  return req.headers.authorization === `Bearer ${LUMEN_ADMIN_TOKEN}`;
 }
 
 function readJsonBody(req) {
@@ -508,10 +519,45 @@ function writeSpeakerProfiles(profiles) {
 }
 
 function sanitizeProfiles(profiles) {
-  return profiles
+  return dedupeProfiles(profiles
     .map(sanitizeProfile)
     .filter(Boolean)
-    .slice(0, 100);
+  ).slice(0, 100);
+}
+
+function dedupeProfiles(profiles) {
+  return profiles.reduce((acc, profile) => {
+    const existingIndex = acc.findIndex((item) => isSameProfile(item, profile));
+    if (existingIndex === -1) {
+      acc.push(profile);
+      return acc;
+    }
+
+    acc[existingIndex] = mergeProfiles(acc[existingIndex], profile);
+    return acc;
+  }, []);
+}
+
+function isSameProfile(left, right) {
+  return (
+    left.id === right.id ||
+    overlappingSources(left.sources, right.sources)
+  );
+}
+
+function mergeProfiles(existing, next) {
+  return {
+    ...existing,
+    ...next,
+    label: next.label || existing.label,
+    relation: next.relation || existing.relation,
+    description: next.description || existing.description,
+    source: next.source || existing.source,
+    sources: mergeSources(existing.sources, next.sources),
+    signature: next.signature?.length ? next.signature : existing.signature,
+    createdAt: existing.createdAt || next.createdAt,
+    lastSeenAt: next.lastSeenAt || existing.lastSeenAt,
+  };
 }
 
 function sanitizeProfile(profile) {
@@ -525,11 +571,34 @@ function sanitizeProfile(profile) {
   return {
     id,
     label,
-    source: String(profile.source ?? "").trim().slice(0, 64),
+    relation: String(profile.relation ?? "").trim().slice(0, 48),
+    description: String(profile.description ?? "").trim().slice(0, 240),
+    source: sanitizeSource(profile.source),
+    sources: sanitizeSources(profile.sources, profile.source),
     signature: sanitizeSignature(profile.signature),
     createdAt: String(profile.createdAt ?? now).slice(0, 40),
     lastSeenAt: String(profile.lastSeenAt ?? now).slice(0, 40),
   };
+}
+
+function sanitizeSource(source) {
+  return String(source ?? "").trim().slice(0, 64);
+}
+
+function sanitizeSources(sources, legacySource) {
+  const values = Array.isArray(sources) ? sources : [];
+  const sanitized = [...values, legacySource]
+    .map(sanitizeSource)
+    .filter(Boolean);
+  return Array.from(new Set(sanitized)).slice(0, 12);
+}
+
+function mergeSources(left = [], right = []) {
+  return Array.from(new Set([...left, ...right].filter(Boolean))).slice(0, 12);
+}
+
+function overlappingSources(left = [], right = []) {
+  return left.some((source) => right.includes(source));
 }
 
 function sanitizeSignature(signature) {

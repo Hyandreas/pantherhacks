@@ -24,6 +24,9 @@ const speakerPalette: Record<string, string> = {
   live_a: "#98ffd8",
   live_b: "#ffd18b",
   live_c: "#d6c2ff",
+  "speaker-0": "#98ffd8",
+  "speaker-1": "#ffd18b",
+  "speaker-2": "#d6c2ff",
 };
 
 interface MissedMoment {
@@ -37,14 +40,50 @@ interface MissedMoment {
 interface SpeakerProfile {
   id: string;
   label: string;
+  relation: string;
+  description: string;
   source: string;
+  sources: string[];
   signature?: number[];
   createdAt: string;
   lastSeenAt: string;
 }
 
+interface CaptionServerHealth {
+  ok?: boolean;
+  hasApiKey?: boolean;
+  model?: string;
+  authConfigured?: boolean;
+  profileEditingRequiresAuth?: boolean;
+}
+
 function sanitizeText(text: string): string {
   return text.slice(0, 500).replace(/[<>]/g, "");
+}
+
+function normalizeSpeakerProfiles(profiles: SpeakerProfile[]) {
+  return profiles.map((profile) => ({
+    ...profile,
+    label: profile.label ?? "",
+    relation: profile.relation ?? "",
+    description: profile.description ?? "",
+    source: profile.source ?? "",
+    sources: normalizeProfileSources(profile),
+    signature: Array.isArray(profile.signature) ? profile.signature : [],
+  }));
+}
+
+function normalizeProfileSources(profile: Partial<SpeakerProfile>) {
+  return Array.from(
+    new Set([
+      ...(Array.isArray(profile.sources) ? profile.sources : []),
+      profile.source,
+    ].filter(Boolean) as string[]),
+  );
+}
+
+function addProfileSource(profile: SpeakerProfile, source: string) {
+  return Array.from(new Set([...normalizeProfileSources(profile), source]));
 }
 
 function App() {
@@ -67,19 +106,18 @@ function App() {
   const [selectedCaptionId, setSelectedCaptionId] = useState<string | null>(null);
   const [flashCritical, setFlashCritical] = useState(false);
   const [micLevel, setMicLevel] = useState(0);
-  const [adminToken, setAdminToken] = useState(
-    () => window.localStorage.getItem("lumenAdminToken") ?? "",
-  );
-  const [adminTokenInput, setAdminTokenInput] = useState("");
   const [speakerProfiles, setSpeakerProfiles] = useState<SpeakerProfile[]>([]);
   const [speakerProfileStatus, setSpeakerProfileStatus] = useState(
-    "Sign in to edit AR speaker labels.",
+    "Edit labels, relation, and description for AR speaker cards.",
   );
+  const [pendingLiveSpeakerId, setPendingLiveSpeakerId] = useState<string | null>(null);
+  const [selectedProfileForAssignment, setSelectedProfileForAssignment] = useState("");
   const demoControlsRef = useRef<DemoAdapterControls | null>(null);
   const micStreamRef = useRef<MediaStream | null>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
   const volumeFrameRef = useRef<number | null>(null);
   const liveTranscriptCache = useRef<Record<string, string>>({});
+  const autoCreatedSpeakerProfilesRef = useRef<Record<string, SpeakerProfile>>({});
   const pendingMissedMomentIdRef = useRef<string | null>(null);
   const pendingMissedBeforeCaptionIdRef = useRef<string | null>(null);
   const captionEndRef = useRef<HTMLDivElement>(null);
@@ -116,6 +154,9 @@ function App() {
   const pendingMissedMoment = missedMoments.find(
     (moment) => moment.id === pendingMissedMomentId,
   );
+  const pendingLiveSpeakerLabel = pendingLiveSpeakerId
+    ? defaultSpeakerLabel(pendingLiveSpeakerId)
+    : "";
 
   useEffect(() => {
     return () => {
@@ -132,11 +173,6 @@ function App() {
   useEffect(() => {
     void refreshSpeakerProfiles();
   }, []);
-
-  useEffect(() => {
-    if (!adminToken) return;
-    window.localStorage.setItem("lumenAdminToken", adminToken);
-  }, [adminToken]);
 
   function addSessionEvent(event: SessionEvent) {
     setEvents((current) => [...current, event]);
@@ -210,22 +246,28 @@ function App() {
 
   async function startLiveCaptions() {
     resetSession(false);
-    setListening(true);
     setSessionMode("bridge");
+    setStatusMessage("Checking the local caption server.");
+
+    if (!speechAdapter.isSupported()) {
+      setStatusMessage(
+        "Live captions are not available in this browser. Open demo options to run a scripted scenario.",
+      );
+      return;
+    }
+
+    const health = await checkCaptionServer();
+    if (!health.ready) {
+      setStatusMessage(health.message);
+      return;
+    }
+
+    setListening(true);
     addSessionEvent({
       type: "consent_state",
       timestamp: timeLabel(),
       payload: { mode: "bridge", live: true },
     });
-
-    if (!speechAdapter.isSupported()) {
-      setStatusMessage(
-        "This browser does not support live speech recognition. Lumen is ready in demo mode instead.",
-      );
-      startDemoScenario(selectedScenario);
-      return;
-    }
-
     void startVolumeMeter();
 
     speechAdapter.start(
@@ -238,6 +280,17 @@ function App() {
         if (liveTranscriptCache.current[cacheKey] === rawText) return;
         liveTranscriptCache.current[cacheKey] = rawText;
 
+        const liveSpeakerId = result.speakerId ?? "live_a";
+        const liveSpeakerProfile =
+          result.speakerId
+            ? ensureLiveSpeakerProfile(result.speakerId)
+            : findProfileForSpeaker(liveSpeakerId);
+        const speakerLabel =
+          liveSpeakerProfile?.label || defaultSpeakerLabel(liveSpeakerId);
+        if (result.speakerId && liveSpeakerProfile?.label === defaultSpeakerLabel(liveSpeakerId)) {
+          setPendingLiveSpeakerId((current) => current ?? result.speakerId ?? null);
+        }
+
         const baseId = `live-${result.resultIndex}`;
         const id =
           pendingRecoveryId && pendingMissedBeforeCaptionIdRef.current === baseId
@@ -246,8 +299,8 @@ function App() {
         const entities = extractEntities(rawText);
         const caption: CaptionSegment = {
           id,
-          speakerId: "live_a",
-          speakerLabel: "Live speaker",
+          speakerId: liveSpeakerId,
+          speakerLabel,
           text: rawText,
           confidence: result.confidence,
           timestamp: timeLabel(),
@@ -289,10 +342,70 @@ function App() {
         setStatusMessage("Live captions are flowing.");
       },
       (message) => {
-        setStatusMessage(message);
-        startDemoScenario(selectedScenario);
+        speechAdapter.stop();
+        stopVolumeMeter();
+        setListening(false);
+        setMicLevel(0);
+        setStatusMessage(`${message} Open demo options if you want to use scripted captions.`);
       },
+      (message) => setStatusMessage(message),
     );
+  }
+
+  async function checkCaptionServer() {
+    try {
+      const health = await fetchCaptionServerHealth();
+
+      if (!health) {
+        return {
+          ready: false,
+          message: "The local caption server is running but returned an error.",
+        };
+      }
+
+      if (!health.ok) {
+        return {
+          ready: false,
+          message: "The local caption server is reachable but not healthy.",
+        };
+      }
+
+      if (!health.hasApiKey) {
+        return {
+          ready: false,
+          message:
+            "The local caption server is missing DEEPGRAM_API_KEY. Add it to deepgram_server/.env and restart the server.",
+        };
+      }
+
+      return {
+        ready: true,
+        message: `Caption server ready${health.model ? ` with ${health.model}` : ""}.`,
+      };
+    } catch {
+      return {
+        ready: false,
+        message:
+          "Caption server is offline. Start deepgram_server first, then start live captions again.",
+      };
+    }
+  }
+
+  async function fetchCaptionServerHealth() {
+    const response = await fetch(`${LUMEN_API_URL}/health`, {
+      cache: "no-store",
+    });
+    if (!response.ok) return null;
+    return (await response.json()) as CaptionServerHealth;
+  }
+
+  async function readResponseError(response: Response) {
+    try {
+      const payload = (await response.json()) as { error?: string };
+      return payload.error;
+    } catch {
+      return "";
+    }
   }
 
   function resetSession(clearSaved = true) {
@@ -457,62 +570,163 @@ function App() {
   async function refreshSpeakerProfiles() {
     try {
       const response = await fetch(`${LUMEN_API_URL}/speaker-profiles`);
+      if (!response.ok) {
+        setSpeakerProfileStatus("Speaker profile server returned an error.");
+        return;
+      }
       const payload = (await response.json()) as { profiles?: SpeakerProfile[] };
-      setSpeakerProfiles(Array.isArray(payload.profiles) ? payload.profiles : []);
+      setSpeakerProfiles(
+        Array.isArray(payload.profiles)
+          ? normalizeSpeakerProfiles(payload.profiles)
+          : [],
+      );
     } catch {
       setSpeakerProfileStatus("Speaker profile server is not reachable.");
     }
   }
 
-  async function signInSpeakerProfiles() {
+  async function saveSpeakerProfiles(nextProfiles: SpeakerProfile[]) {
     try {
-      const response = await fetch(`${LUMEN_API_URL}/auth/login`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ token: adminTokenInput }),
-      });
-
-      if (!response.ok) {
-        setSpeakerProfileStatus("Wrong admin token.");
+      const health = await fetchCaptionServerHealth();
+      if (health?.authConfigured && health.profileEditingRequiresAuth !== false) {
+        setSpeakerProfileStatus(
+          "Restart deepgram_server. The running server still requires the old admin password.",
+        );
         return;
       }
 
-      setAdminToken(adminTokenInput);
-      setAdminTokenInput("");
-      setSpeakerProfileStatus("Signed in. Speaker labels can be edited.");
-      void refreshSpeakerProfiles();
-    } catch {
-      setSpeakerProfileStatus("Auth server is not reachable.");
-    }
-  }
-
-  async function saveSpeakerProfiles(nextProfiles: SpeakerProfile[]) {
-    try {
       const response = await fetch(`${LUMEN_API_URL}/speaker-profiles`, {
         method: "PUT",
         headers: {
-          "Authorization": `Bearer ${adminToken}`,
           "Content-Type": "application/json",
         },
         body: JSON.stringify({ profiles: nextProfiles }),
       });
 
       if (!response.ok) {
-        setSpeakerProfileStatus("Sign in again to edit speaker labels.");
+        const errorText = await readResponseError(response);
+        setSpeakerProfileStatus(
+          errorText || `Could not save speaker profiles. Server returned ${response.status}.`,
+        );
         return;
       }
 
       const payload = (await response.json()) as { profiles?: SpeakerProfile[] };
-      setSpeakerProfiles(Array.isArray(payload.profiles) ? payload.profiles : nextProfiles);
-      setSpeakerProfileStatus("Speaker labels saved. AR will update automatically.");
+      setSpeakerProfiles(
+        Array.isArray(payload.profiles)
+          ? normalizeSpeakerProfiles(payload.profiles)
+          : normalizeSpeakerProfiles(nextProfiles),
+      );
+      setSpeakerProfileStatus("Speaker profiles saved. AR will update automatically.");
     } catch {
-      setSpeakerProfileStatus("Could not save speaker labels.");
+      setSpeakerProfileStatus(
+        "Could not reach the speaker profile server. Start or restart deepgram_server.",
+      );
     }
   }
 
-  function updateSpeakerProfileLabel(id: string, label: string) {
+  async function createManualSpeakerProfile() {
+    const now = new Date().toISOString();
+    const nextProfiles = [
+      ...speakerProfiles,
+      {
+        id: `profile-${Date.now()}`,
+        label: "New profile",
+        relation: "",
+        description: "",
+        source: "",
+        sources: [],
+        signature: [],
+        createdAt: now,
+        lastSeenAt: now,
+      },
+    ];
+    setSpeakerProfiles(nextProfiles);
+    await saveSpeakerProfiles(nextProfiles);
+  }
+
+  async function createProfileForLiveSpeaker() {
+    if (!pendingLiveSpeakerId) return;
+
+    const now = new Date().toISOString();
+    const label = defaultSpeakerLabel(pendingLiveSpeakerId);
+    const nextProfiles = [
+      ...speakerProfiles,
+      {
+        id: `profile-${Date.now()}`,
+        label,
+        relation: "",
+        description: "",
+        source: pendingLiveSpeakerId,
+        sources: [pendingLiveSpeakerId],
+        signature: [],
+        createdAt: now,
+        lastSeenAt: now,
+      },
+    ];
+    setSpeakerProfiles(nextProfiles);
+    relabelCaptionsForSpeaker(pendingLiveSpeakerId, label);
+    setPendingLiveSpeakerId(null);
+    await saveSpeakerProfiles(nextProfiles);
+  }
+
+  function ensureLiveSpeakerProfile(speakerId: string) {
+    const existingProfile =
+      findProfileForSpeaker(speakerId) ?? autoCreatedSpeakerProfilesRef.current[speakerId];
+    if (existingProfile) return existingProfile;
+
+    const now = new Date().toISOString();
+    const profile: SpeakerProfile = {
+      id: `profile-${speakerId}-${Date.now()}`,
+      label: defaultSpeakerLabel(speakerId),
+      relation: "",
+      description: "",
+      source: speakerId,
+      sources: [speakerId],
+      signature: [],
+      createdAt: now,
+      lastSeenAt: now,
+    };
+    autoCreatedSpeakerProfilesRef.current[speakerId] = profile;
+    const nextProfiles = [...speakerProfiles, profile];
+    setSpeakerProfiles(nextProfiles);
+    void saveSpeakerProfiles(nextProfiles);
+    return profile;
+  }
+
+  async function assignLiveSpeakerToProfile() {
+    if (!pendingLiveSpeakerId || !selectedProfileForAssignment) return;
+
+    const now = new Date().toISOString();
     const nextProfiles = speakerProfiles.map((profile) =>
-      profile.id === id ? { ...profile, label, lastSeenAt: new Date().toISOString() } : profile,
+      profile.id === selectedProfileForAssignment
+        ? {
+            ...profile,
+            source: profile.source || pendingLiveSpeakerId,
+            sources: addProfileSource(profile, pendingLiveSpeakerId),
+            lastSeenAt: now,
+          }
+        : profile,
+    );
+    const assignedProfile = nextProfiles.find(
+      (profile) => profile.id === selectedProfileForAssignment,
+    );
+    setSpeakerProfiles(nextProfiles);
+    if (assignedProfile) {
+      relabelCaptionsForSpeaker(pendingLiveSpeakerId, assignedProfile.label);
+    }
+    setPendingLiveSpeakerId(null);
+    setSelectedProfileForAssignment("");
+    await saveSpeakerProfiles(nextProfiles);
+  }
+
+  function updateSpeakerProfile(
+    id: string,
+    field: "label" | "relation" | "description",
+    value: string,
+  ) {
+    const nextProfiles = speakerProfiles.map((profile) =>
+      profile.id === id ? { ...profile, [field]: value, lastSeenAt: new Date().toISOString() } : profile,
     );
     setSpeakerProfiles(nextProfiles);
   }
@@ -521,6 +735,20 @@ function App() {
     const nextProfiles = speakerProfiles.filter((profile) => profile.id !== id);
     setSpeakerProfiles(nextProfiles);
     void saveSpeakerProfiles(nextProfiles);
+  }
+
+  function findProfileForSpeaker(speakerId: string) {
+    return speakerProfiles.find((profile) =>
+      normalizeProfileSources(profile).includes(speakerId),
+    );
+  }
+
+  function relabelCaptionsForSpeaker(speakerId: string, label: string) {
+    setCaptions((current) =>
+      current.map((caption) =>
+        caption.speakerId === speakerId ? { ...caption, speakerLabel: label } : caption,
+      ),
+    );
   }
 
   const selectedCaption = captions.find((caption) => caption.id === selectedCaptionId) ?? null;
@@ -880,43 +1108,73 @@ function App() {
 
           <section className="control-card speaker-admin-card">
             <p className="eyebrow">AR Speaker Profiles</p>
-            <h3>Shared labels</h3>
+            <h3>Shared profiles</h3>
             <p className="muted">{speakerProfileStatus}</p>
 
-            {!adminToken ? (
-              <div className="speaker-auth">
-                <input
-                  type="password"
-                  value={adminTokenInput}
-                  onChange={(event) => setAdminTokenInput(event.currentTarget.value)}
-                  placeholder="Admin token"
-                />
-                <button type="button" onClick={signInSpeakerProfiles}>
-                  Sign in
-                </button>
+            <div className="speaker-admin-actions">
+              <button
+                type="button"
+                className="secondary"
+                onClick={() => void saveSpeakerProfiles(speakerProfiles)}
+              >
+                Save profiles
+              </button>
+              <button
+                type="button"
+                className="secondary"
+                onClick={() => void createManualSpeakerProfile()}
+              >
+                Add profile
+              </button>
+              <button
+                type="button"
+                className="ghost"
+                onClick={() => void refreshSpeakerProfiles()}
+              >
+                Refresh
+              </button>
+            </div>
+
+            {pendingLiveSpeakerId ? (
+              <div className="speaker-assignment-card">
+                <strong>New speaker detected: {pendingLiveSpeakerLabel}</strong>
+                <p className="muted">
+                  Create a new profile or assign this speaker to an existing profile.
+                </p>
+                <div className="speaker-assignment-actions">
+                  <button
+                    type="button"
+                    className="secondary"
+                    onClick={() => void createProfileForLiveSpeaker()}
+                  >
+                    Create new
+                  </button>
+                  <select
+                    value={selectedProfileForAssignment}
+                    onChange={(event) =>
+                      setSelectedProfileForAssignment(event.currentTarget.value)
+                    }
+                    aria-label="Existing speaker profile"
+                  >
+                    <option value="">Choose profile</option>
+                    {speakerProfiles.map((profile) => (
+                      <option key={profile.id} value={profile.id}>
+                        {profile.label || "Unnamed profile"}
+                        {profile.relation ? ` - ${profile.relation}` : ""}
+                      </option>
+                    ))}
+                  </select>
+                  <button
+                    type="button"
+                    className="ghost"
+                    disabled={!selectedProfileForAssignment}
+                    onClick={() => void assignLiveSpeakerToProfile()}
+                  >
+                    Assign
+                  </button>
+                </div>
               </div>
-            ) : (
-              <div className="speaker-admin-actions">
-                <button
-                  type="button"
-                  className="secondary"
-                  onClick={() => void saveSpeakerProfiles(speakerProfiles)}
-                >
-                  Save labels
-                </button>
-                <button
-                  type="button"
-                  className="ghost"
-                  onClick={() => {
-                    window.localStorage.removeItem("lumenAdminToken");
-                    setAdminToken("");
-                    setSpeakerProfileStatus("Signed out.");
-                  }}
-                >
-                  Sign out
-                </button>
-              </div>
-            )}
+            ) : null}
 
             <div className="speaker-profile-list">
               {speakerProfiles.length === 0 ? (
@@ -925,17 +1183,36 @@ function App() {
                 speakerProfiles.map((profile) => (
                   <div key={profile.id} className="speaker-profile-row">
                     <input
+                      aria-label="Speaker label"
                       value={profile.label}
-                      disabled={!adminToken}
                       onChange={(event) =>
-                        updateSpeakerProfileLabel(profile.id, event.currentTarget.value)
+                        updateSpeakerProfile(profile.id, "label", event.currentTarget.value)
                       }
                     />
-                    <span>{profile.source || "manual"}</span>
+                    <input
+                      aria-label="Speaker relation"
+                      value={profile.relation}
+                      onChange={(event) =>
+                        updateSpeakerProfile(profile.id, "relation", event.currentTarget.value)
+                      }
+                      placeholder="Relation"
+                    />
+                    <input
+                      aria-label="Speaker description"
+                      value={profile.description}
+                      onChange={(event) =>
+                        updateSpeakerProfile(profile.id, "description", event.currentTarget.value)
+                      }
+                      placeholder="Short description"
+                    />
+                    <span>
+                      {normalizeProfileSources(profile).length
+                        ? normalizeProfileSources(profile).join(", ")
+                        : "manual"}
+                    </span>
                     <button
                       type="button"
                       className="ghost"
-                      disabled={!adminToken}
                       onClick={() => deleteSpeakerProfile(profile.id)}
                     >
                       Delete
@@ -976,6 +1253,14 @@ function confidenceLabel(confidence: number) {
   if (confidence >= 0.88) return { label: "High confidence", tone: "good" };
   if (confidence >= 0.72) return { label: "Check wording", tone: "warn" };
   return { label: "Uncertain", tone: "danger" };
+}
+
+function defaultSpeakerLabel(speakerId: string) {
+  const speakerIndex = speakerId.match(/^speaker-(\d+)$/)?.[1];
+  if (speakerIndex !== undefined) {
+    return `Speaker ${Number(speakerIndex) + 1}`;
+  }
+  return speakerId === "live_a" ? "Live speaker" : speakerId.replace(/[-_]/g, " ");
 }
 
 export default App;

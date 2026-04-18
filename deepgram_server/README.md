@@ -14,7 +14,6 @@ Create `deepgram_server/.env`:
 DEEPGRAM_API_KEY=your_deepgram_api_key_here
 DEEPGRAM_MODEL=nova-3
 PORT=8788
-LUMEN_ADMIN_TOKEN=change-this-local-password
 ```
 
 ## Run

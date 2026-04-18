@@ -17,7 +17,6 @@ Create `deepgram_server/.env`:
 DEEPGRAM_API_KEY=your_deepgram_api_key_here
 DEEPGRAM_MODEL=nova-3
 PORT=8788
-LUMEN_ADMIN_TOKEN=change-this-local-password
 ```
 
 Start the proxy first:
@@ -58,14 +57,14 @@ Deepgram returns speech results.
 
 ## Notes
 
-The local proxy listens on `ws://127.0.0.1:8788/captions`. The web app uses
-`LUMEN_ADMIN_TOKEN` to edit shared speaker labels, and the AR app reads those
-labels from the proxy. Do not commit `.env` files or paste API keys into client
-code.
+The local proxy listens on `ws://127.0.0.1:8788/captions`. The web app edits
+shared speaker labels, relation, and description, and the AR app reads those
+profiles from the proxy. Do not commit `.env` files or paste API keys into
+client code.
 
-Open the web app's `AR Speaker Profiles` panel, sign in with
-`LUMEN_ADMIN_TOKEN`, edit labels, and click `Save labels`. The AR app polls the
-proxy and reflects saved label changes automatically.
+Open the web app's `AR Speaker Profiles` panel, edit profile fields, and click
+`Save profiles`. The AR app polls the proxy and reflects saved profile changes
+automatically.
 
 AR also stores a lightweight voice signature with each confirmed profile. On a
 future session it can suggest a likely match, but the user must confirm before a

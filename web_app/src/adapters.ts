@@ -9,6 +9,7 @@ export interface LiveCaptionResult {
   confidence: number;
   resultIndex: number;
   isFinal: boolean;
+  speakerId?: string;
 }
 
 export interface LiveCaptionAdapter {
@@ -16,6 +17,7 @@ export interface LiveCaptionAdapter {
   start(
     onCaption: (result: LiveCaptionResult) => void,
     onError: (message: string) => void,
+    onStatus?: (message: string) => void,
   ): void;
   stop(): void;
 }
@@ -26,6 +28,9 @@ interface DeepgramResultMessage {
     alternatives?: Array<{
       transcript?: string;
       confidence?: number;
+      words?: Array<{
+        speaker?: number;
+      }>;
     }>;
   };
   start?: number;
@@ -51,6 +56,7 @@ export class DeepgramCaptionAdapter implements LiveCaptionAdapter {
   async start(
     onCaption: (result: LiveCaptionResult) => void,
     onError: (message: string) => void,
+    onStatus?: (message: string) => void,
   ) {
     if (!this.isSupported()) {
       onError("Live microphone streaming is not available in this browser.");
@@ -58,13 +64,16 @@ export class DeepgramCaptionAdapter implements LiveCaptionAdapter {
     }
 
     try {
+      onStatus?.("Requesting microphone permission.");
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      onStatus?.("Microphone is on. Connecting to the caption server.");
       const socket = new WebSocket(DEEPGRAM_PROXY_URL);
 
       this.stream = stream;
       this.socket = socket;
 
       socket.onopen = () => {
+        onStatus?.("Caption server connected. Waiting for speech.");
         const recorder = createMediaRecorder(stream);
         this.recorder = recorder;
 
@@ -102,6 +111,7 @@ export class DeepgramCaptionAdapter implements LiveCaptionAdapter {
           confidence: alternative.confidence ?? 0.82,
           resultIndex,
           isFinal: Boolean(message.is_final || message.speech_final),
+          speakerId: extractSpeakerId(alternative),
         });
 
         if (message.is_final || message.speech_final) {
@@ -134,6 +144,25 @@ export class DeepgramCaptionAdapter implements LiveCaptionAdapter {
     this.stream = undefined;
     this.fallbackIndex = 0;
   }
+}
+
+function extractSpeakerId(alternative: { words?: Array<{ speaker?: number }> }) {
+  const speakerCounts = new Map<number, number>();
+  for (const word of alternative.words ?? []) {
+    if (typeof word.speaker !== "number") continue;
+    speakerCounts.set(word.speaker, (speakerCounts.get(word.speaker) ?? 0) + 1);
+  }
+
+  let speaker: number | undefined;
+  let maxCount = 0;
+  for (const [candidate, count] of speakerCounts) {
+    if (count > maxCount) {
+      speaker = candidate;
+      maxCount = count;
+    }
+  }
+
+  return typeof speaker === "number" ? `speaker-${speaker}` : undefined;
 }
 
 function parseDeepgramMessage(data: MessageEvent["data"]) {

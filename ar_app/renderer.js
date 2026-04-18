@@ -5,13 +5,23 @@ const MEDIAPIPE_HANDS_BASE_URL = new URL(
   window.location.href,
 ).toString();
 const CHUNK_MS = 250;
+const DWELL_CLICK_MS = 2000;
+const DWELL_COOLDOWN_MS = 900;
 
 const video = document.querySelector("#cameraFeed");
 const errorMessage = document.querySelector("#cameraError");
 const closeButton = document.querySelector("#closeButton");
+const translateButton = document.querySelector("#translateButton");
+const translatePanel = document.querySelector("#translatePanel");
+const translatePanelClose = document.querySelector("#translatePanelClose");
+const spokenLanguageButton = document.querySelector("#spokenLanguageButton");
+const spokenLanguageList = document.querySelector("#spokenLanguageList");
+const captionLanguageButton = document.querySelector("#captionLanguageButton");
+const captionLanguageList = document.querySelector("#captionLanguageList");
 const captionOverlay = document.querySelector("#captionOverlay");
 const captionStatus = document.querySelector("#captionStatus");
 const captionText = document.querySelector("#captionText");
+const whoIsThisButton = document.querySelector("#whoIsThisButton");
 const confidenceBar = document.querySelector("#confidenceBar span");
 const speakerPrompt = document.querySelector("#speakerPrompt");
 const speakerPromptButton = document.querySelector("#speakerPromptButton");
@@ -19,6 +29,17 @@ const speakerPromptName = document.querySelector("#speakerPromptName");
 const speakerPromptForm = document.querySelector("#speakerPromptForm");
 const speakerNameInput = document.querySelector("#speakerNameInput");
 const speakerLaterButton = document.querySelector("#speakerLaterButton");
+const speakerInfoPanel = document.querySelector("#speakerInfoPanel");
+const speakerInfoClose = document.querySelector("#speakerInfoClose");
+const speakerInfoName = document.querySelector("#speakerInfoName");
+const speakerInfoRelation = document.querySelector("#speakerInfoRelation");
+const speakerInfoDescription = document.querySelector("#speakerInfoDescription");
+const speakerInfoForm = document.querySelector("#speakerInfoForm");
+const speakerProfilePickerButton = document.querySelector("#speakerProfilePickerButton");
+const speakerProfilePickerList = document.querySelector("#speakerProfilePickerList");
+const speakerInfoNameInput = document.querySelector("#speakerInfoNameInput");
+const speakerInfoRelationInput = document.querySelector("#speakerInfoRelationInput");
+const speakerInfoDescriptionInput = document.querySelector("#speakerInfoDescriptionInput");
 const handCursor = document.querySelector("#handCursor");
 const handStatus = document.querySelector("#handStatus");
 
@@ -30,11 +51,17 @@ let voiceAnalyser = null;
 let voiceInterval = null;
 let currentVoiceSignature = null;
 let lastTranscript = "";
+let currentSpeakerId = null;
+let infoPanelSpeakerId = null;
+let selectedSpeakerProfileId = "";
 let pendingSpeakerId = null;
 let pendingMatchProfileId = null;
 let handTracker = null;
 let pinchDown = false;
 let lastCursorPoint = null;
+let dwellTarget = null;
+let dwellStartedAt = 0;
+let dwellCooldownUntil = 0;
 let handSendFailures = 0;
 let handFrameBusy = false;
 let lastHandFrameAt = 0;
@@ -50,6 +77,20 @@ const sessionProfileAssignments = new Map();
 const speakerSignatureSamples = new Map();
 const dismissedSpeakers = new Set();
 const promptedSpeakers = new Set();
+
+const languages = [
+  { code: "en", label: "English" },
+  { code: "es", label: "Spanish" },
+  { code: "fr", label: "French" },
+  { code: "zh", label: "Chinese" },
+  { code: "hi", label: "Hindi" },
+  { code: "ar", label: "Arabic" },
+  { code: "pt", label: "Portuguese" },
+  { code: "ko", label: "Korean" },
+  { code: "ja", label: "Japanese" },
+];
+let spokenLanguageCode = "en";
+let captionLanguageCode = "en";
 
 async function startCamera() {
   try {
@@ -114,11 +155,13 @@ async function startDeepgramCaptions() {
       if (!text || text === lastTranscript) return;
 
       const speakerId = extractSpeakerId(alternative);
-      const speakerLabel = getSpeakerLabel(speakerId);
+      currentSpeakerId = speakerId;
       if (speakerId !== null) {
+        ensureProfileForSpeaker(speakerId);
         collectSpeakerSignature(speakerId);
         maybePromptForSpeaker(speakerId);
       }
+      const speakerLabel = getSpeakerLabel(speakerId);
 
       lastTranscript = text;
       captionOverlay.hidden = false;
@@ -127,6 +170,7 @@ async function startDeepgramCaptions() {
           ? `${speakerLabel} - Deepgram captions`
           : `${speakerLabel} - Listening`;
       captionText.textContent = text;
+      whoIsThisButton.hidden = speakerId === null;
       confidenceBar.style.width = `${Math.round((alternative.confidence || 0.82) * 100)}%`;
     };
 
@@ -185,6 +229,7 @@ function startHandTracking() {
       handCursor.hidden = true;
       pinchDown = false;
       lastCursorPoint = null;
+      resetDwellClick();
       handStatus.textContent = "Hand tracking: no hand";
       return;
     }
@@ -209,6 +254,7 @@ function startHandTracking() {
       handCursor.hidden = true;
       pinchDown = false;
       lastCursorPoint = null;
+      resetDwellClick();
       handStatus.textContent = "Hand tracking: hand detected (raise index)";
       return;
     }
@@ -235,9 +281,12 @@ function startHandTracking() {
       handCursor.classList.add("clicking");
       handStatus.textContent = "Hand tracking: pinch click";
       clickAtPoint(x, y);
+      resetDwellClick();
     } else if (pinchDown && releaseNow) {
       pinchDown = false;
       handCursor.classList.remove("clicking");
+    } else if (!pinchDown) {
+      updateDwellClick(x, y);
     }
   });
 
@@ -340,11 +389,8 @@ async function restartHandTracking() {
 }
 
 function clickAtPoint(x, y) {
-  const target = document.elementFromPoint(x, y);
+  const target = getInteractiveTargetAtPoint(x, y);
   if (!target) return;
-
-  // Avoid clicking the cursor itself.
-  if (target === handCursor) return;
 
   const options = {
     bubbles: true,
@@ -358,6 +404,54 @@ function clickAtPoint(x, y) {
   target.dispatchEvent(new MouseEvent("mousedown", options));
   target.dispatchEvent(new MouseEvent("mouseup", options));
   target.dispatchEvent(new MouseEvent("click", options));
+}
+
+function updateDwellClick(x, y) {
+  const now = performance.now();
+  const target = getInteractiveTargetAtPoint(x, y);
+
+  if (!target || now < dwellCooldownUntil) {
+    resetDwellClick();
+    return;
+  }
+
+  if (target !== dwellTarget) {
+    dwellTarget = target;
+    dwellStartedAt = now;
+    handCursor.style.setProperty("--dwell-progress", "0deg");
+    handCursor.classList.add("dwelling");
+    handStatus.textContent = "Hand tracking: hold to click";
+    return;
+  }
+
+  const elapsed = now - dwellStartedAt;
+  const progress = Math.min(1, elapsed / DWELL_CLICK_MS);
+  handCursor.style.setProperty("--dwell-progress", `${Math.round(progress * 360)}deg`);
+
+  if (progress >= 1) {
+    handCursor.classList.add("clicking");
+    handStatus.textContent = "Hand tracking: hold click";
+    clickAtPoint(x, y);
+    dwellCooldownUntil = now + DWELL_COOLDOWN_MS;
+    resetDwellClick();
+    window.setTimeout(() => handCursor.classList.remove("clicking"), 180);
+  }
+}
+
+function resetDwellClick() {
+  dwellTarget = null;
+  dwellStartedAt = 0;
+  handCursor.classList.remove("dwelling");
+  handCursor.style.setProperty("--dwell-progress", "0deg");
+}
+
+function getInteractiveTargetAtPoint(x, y) {
+  const target = document.elementFromPoint(x, y);
+  if (!target || target === handCursor) return null;
+
+  return target.closest(
+    "button, input, textarea, select, a, label, [role='button'], [tabindex]:not([tabindex='-1'])",
+  );
 }
 
 function clamp01(value) {
@@ -433,25 +527,50 @@ function normalizeTranscript(text) {
 }
 
 function extractSpeakerId(alternative) {
-  const speaker = alternative?.words?.find(
-    (word) => word.speaker !== undefined,
-  )?.speaker;
+  const speakerCounts = new Map();
+  for (const word of alternative?.words ?? []) {
+    if (typeof word.speaker !== "number") continue;
+    speakerCounts.set(word.speaker, (speakerCounts.get(word.speaker) ?? 0) + 1);
+  }
+
+  let speaker = null;
+  let maxCount = 0;
+  for (const [candidate, count] of speakerCounts) {
+    if (count > maxCount) {
+      speaker = candidate;
+      maxCount = count;
+    }
+  }
+
   return typeof speaker === "number" ? `speaker-${speaker}` : null;
 }
 
 function getSpeakerLabel(speakerId) {
   if (speakerId === null) return "Unknown speaker";
 
-  const profileId = sessionSpeakers.get(speakerId);
-  const profile = speakerProfiles.find((item) => item.id === profileId);
+  const profile = getProfileForSpeaker(speakerId);
   if (profile) return profile.label;
 
-  return speakerId.replace("speaker-", "Speaker ");
+  return defaultSpeakerLabel(speakerId);
+}
+
+function defaultSpeakerLabel(speakerId) {
+  const speakerIndex = speakerId.match(/^speaker-(\d+)$/)?.[1];
+  return speakerIndex === undefined
+    ? speakerId.replace(/[-_]/g, " ")
+    : `Speaker ${Number(speakerIndex) + 1}`;
+}
+
+function getProfileForSpeaker(speakerId) {
+  if (speakerId === null) return null;
+
+  const profileId = sessionSpeakers.get(speakerId);
+  const profile = speakerProfiles.find((item) => item.id === profileId);
+  return profile ?? speakerProfiles.find((item) => hasProfileSource(item, speakerId)) ?? null;
 }
 
 function maybePromptForSpeaker(speakerId) {
   if (
-    sessionSpeakers.has(speakerId) ||
     dismissedSpeakers.has(speakerId) ||
     promptedSpeakers.has(speakerId)
   ) {
@@ -459,27 +578,57 @@ function maybePromptForSpeaker(speakerId) {
   }
   if (pendingSpeakerId && pendingSpeakerId !== speakerId) return;
 
-  const match = findVoiceMatch(speakerId);
   pendingSpeakerId = speakerId;
-  pendingMatchProfileId = match?.id ?? null;
+  pendingMatchProfileId = null;
   speakerPrompt.hidden = false;
   speakerPromptButton.hidden = false;
   speakerPromptForm.hidden = true;
-  speakerPromptName.textContent = match
-    ? `Sounds like ${match.label} - tap to confirm`
-    : `${getSpeakerLabel(speakerId)} - tap to name`;
+  speakerPromptName.textContent = `Who's this? ${getSpeakerLabel(speakerId)}`;
 }
 
-async function createSpeakerProfile(label) {
-  if (!pendingSpeakerId) return;
+function ensureProfileForSpeaker(speakerId) {
+  const existingProfile = getProfileForSpeaker(speakerId);
+  if (existingProfile) {
+    sessionSpeakers.set(speakerId, existingProfile.id);
+    sessionProfileAssignments.set(existingProfile.id, speakerId);
+    return existingProfile;
+  }
 
   const now = new Date().toISOString();
   const profile = {
-    id: `profile-${Date.now()}`,
-    label,
-    source: pendingSpeakerId,
-    signature: averageSpeakerSignature(pendingSpeakerId),
+    id: `profile-${speakerId}-${Date.now()}`,
+    label: defaultSpeakerLabel(speakerId),
+    relation: "",
+    description: "",
+    source: speakerId,
+    sources: [speakerId],
+    signature: averageSpeakerSignature(speakerId),
     createdAt: now,
+    lastSeenAt: now,
+  };
+
+  speakerProfiles = upsertProfile(speakerProfiles, profile);
+  sessionSpeakers.set(speakerId, profile.id);
+  sessionProfileAssignments.set(profile.id, speakerId);
+  void saveSpeakerProfile(profile);
+  return profile;
+}
+
+async function createSpeakerProfile(label, relation = "", description = "") {
+  if (!pendingSpeakerId) return;
+
+  const now = new Date().toISOString();
+  const existingProfile = getProfileForSpeaker(pendingSpeakerId);
+  const profile = {
+    ...existingProfile,
+    id: existingProfile?.id ?? `profile-${Date.now()}`,
+    label,
+    relation,
+    description,
+    source: existingProfile?.source || pendingSpeakerId,
+    sources: addProfileSource(existingProfile?.sources, pendingSpeakerId),
+    signature: averageSpeakerSignature(pendingSpeakerId),
+    createdAt: existingProfile?.createdAt ?? now,
     lastSeenAt: now,
   };
 
@@ -508,7 +657,10 @@ async function confirmMatchedSpeaker() {
 
   const updatedProfile = {
     ...profile,
-    source: pendingSpeakerId,
+    source: profile.source || pendingSpeakerId,
+    sources: addProfileSource(profile.sources, pendingSpeakerId),
+    relation: profile.relation ?? "",
+    description: profile.description ?? "",
     signature: blendSignatures(
       profile.signature,
       averageSpeakerSignature(pendingSpeakerId),
@@ -543,14 +695,158 @@ function openRenameForm() {
   speakerNameInput.select();
 }
 
+function openSpeakerInfoPanel(speakerId = currentSpeakerId) {
+  if (speakerId === null) return;
+
+  infoPanelSpeakerId = speakerId;
+  const assignedProfile = getProfileForSpeaker(speakerId);
+  const suggestedProfile =
+    pendingSpeakerId === speakerId && pendingMatchProfileId
+      ? speakerProfiles.find((item) => item.id === pendingMatchProfileId) ?? null
+      : null;
+  const profile = assignedProfile ?? suggestedProfile;
+  const fallbackName = defaultSpeakerLabel(speakerId);
+
+  speakerInfoName.textContent = profile?.label ?? fallbackName;
+  speakerInfoRelation.textContent = profile?.relation || "Not set";
+  speakerInfoDescription.textContent =
+    profile?.description || "No description yet.";
+  renderSpeakerProfileOptions(profile?.id ?? "");
+  speakerInfoNameInput.value = profile?.label ?? fallbackName;
+  speakerInfoRelationInput.value = profile?.relation ?? "";
+  speakerInfoDescriptionInput.value = profile?.description ?? "";
+  speakerInfoPanel.hidden = false;
+}
+
+function closeSpeakerInfoPanel() {
+  speakerInfoPanel.hidden = true;
+  infoPanelSpeakerId = null;
+  closeSpeakerProfilePicker();
+}
+
+async function saveSpeakerInfo(event) {
+  event.preventDefault();
+  if (infoPanelSpeakerId === null) return;
+
+  const label =
+    speakerInfoNameInput.value.trim() ||
+    defaultSpeakerLabel(infoPanelSpeakerId);
+  const relation = speakerInfoRelationInput.value.trim();
+  const description = speakerInfoDescriptionInput.value.trim();
+  let profile = selectedSpeakerProfileId
+    ? speakerProfiles.find((item) => item.id === selectedSpeakerProfileId) ?? null
+    : getProfileForSpeaker(infoPanelSpeakerId);
+
+  if (!profile && pendingSpeakerId === infoPanelSpeakerId && pendingMatchProfileId) {
+    profile = speakerProfiles.find((item) => item.id === pendingMatchProfileId) ?? null;
+  }
+
+  if (profile) {
+    const updatedProfile = {
+      ...profile,
+      label,
+      relation,
+      description,
+      source: profile.source || infoPanelSpeakerId,
+      sources: addProfileSource(profile.sources, infoPanelSpeakerId),
+      signature: blendSignatures(
+        profile.signature,
+        averageSpeakerSignature(infoPanelSpeakerId),
+      ),
+      lastSeenAt: new Date().toISOString(),
+    };
+    speakerProfiles = upsertProfile(speakerProfiles, updatedProfile);
+    sessionSpeakers.set(infoPanelSpeakerId, updatedProfile.id);
+    sessionProfileAssignments.set(updatedProfile.id, infoPanelSpeakerId);
+    promptedSpeakers.add(infoPanelSpeakerId);
+    await saveSpeakerProfile(updatedProfile);
+  } else {
+    pendingSpeakerId = infoPanelSpeakerId;
+    await createSpeakerProfile(label, relation, description);
+  }
+
+  pendingSpeakerId = null;
+  pendingMatchProfileId = null;
+  speakerInfoName.textContent = label;
+  speakerInfoRelation.textContent = relation || "Not set";
+  speakerInfoDescription.textContent = description || "No description yet.";
+  hideSpeakerPrompt();
+}
+
 async function refreshSpeakerProfiles() {
   try {
     const response = await fetch(SPEAKER_PROFILES_URL);
     const payload = await response.json();
-    speakerProfiles = Array.isArray(payload.profiles) ? payload.profiles : [];
+    speakerProfiles = Array.isArray(payload.profiles)
+      ? normalizeSpeakerProfiles(payload.profiles)
+      : [];
+    if (!speakerInfoPanel.hidden) {
+      renderSpeakerProfileOptions(selectedSpeakerProfileId);
+    }
   } catch {
     console.warn("Could not load speaker profiles.");
   }
+}
+
+function renderSpeakerProfileOptions(selectedProfileId = "") {
+  selectedSpeakerProfileId = selectedProfileId;
+  speakerProfilePickerList.replaceChildren();
+
+  const createButton = document.createElement("button");
+  createButton.type = "button";
+  createButton.className = "speaker-profile-picker-option";
+  createButton.dataset.profileId = "";
+  createButton.textContent = "Create new profile";
+  speakerProfilePickerList.append(createButton);
+
+  for (const profile of speakerProfiles) {
+    const label = profile.relation
+      ? `${profile.label || "Unnamed profile"} - ${profile.relation}`
+      : profile.label || "Unnamed profile";
+    const option = document.createElement("button");
+    option.type = "button";
+    option.className = "speaker-profile-picker-option";
+    option.dataset.profileId = profile.id;
+    option.textContent = label;
+    speakerProfilePickerList.append(option);
+  }
+
+  updateSpeakerProfilePickerButton();
+}
+
+function toggleSpeakerProfilePicker() {
+  const open = speakerProfilePickerList.hidden;
+  speakerProfilePickerList.hidden = !open;
+  speakerProfilePickerButton.setAttribute("aria-expanded", String(open));
+}
+
+function closeSpeakerProfilePicker() {
+  speakerProfilePickerList.hidden = true;
+  speakerProfilePickerButton.setAttribute("aria-expanded", "false");
+}
+
+function selectSpeakerProfile(profileId) {
+  selectedSpeakerProfileId = profileId;
+  updateSpeakerProfilePickerButton();
+  closeSpeakerProfilePicker();
+
+  if (profileId) {
+    fillSpeakerInfoFromProfile(profileId);
+  }
+}
+
+function updateSpeakerProfilePickerButton() {
+  const selectedProfile = speakerProfiles.find(
+    (profile) => profile.id === selectedSpeakerProfileId,
+  );
+  if (!selectedProfile) {
+    speakerProfilePickerButton.textContent = "Create new profile";
+    return;
+  }
+
+  speakerProfilePickerButton.textContent = selectedProfile.relation
+    ? `${selectedProfile.label || "Unnamed profile"} - ${selectedProfile.relation}`
+    : selectedProfile.label || "Unnamed profile";
 }
 
 async function saveSpeakerProfile(profile) {
@@ -564,15 +860,138 @@ async function saveSpeakerProfile(profile) {
     });
     const payload = await response.json();
     speakerProfiles = Array.isArray(payload.profiles)
-      ? payload.profiles
+      ? normalizeSpeakerProfiles(payload.profiles)
       : speakerProfiles;
   } catch {
     console.warn("Could not save speaker profile.");
   }
 }
 
+function normalizeSpeakerProfiles(profiles) {
+  return profiles.map((profile) => ({
+    ...profile,
+    label: profile.label || "",
+    relation: profile.relation || "",
+    description: profile.description || "",
+    source: profile.source || "",
+    sources: normalizeProfileSources(profile),
+    signature: Array.isArray(profile.signature) ? profile.signature : [],
+  }));
+}
+
+function normalizeProfileSources(profile) {
+  const sources = Array.isArray(profile.sources) ? profile.sources : [];
+  return Array.from(new Set([...sources, profile.source].filter(Boolean)));
+}
+
+function addProfileSource(sources, source) {
+  return Array.from(new Set([...(Array.isArray(sources) ? sources : []), source].filter(Boolean)));
+}
+
+function hasProfileSource(profile, source) {
+  return normalizeProfileSources(profile).includes(source);
+}
+
+function fillSpeakerInfoFromProfile(profileId) {
+  const profile = speakerProfiles.find((item) => item.id === profileId);
+  if (!profile || infoPanelSpeakerId === null) return;
+
+  const fallbackName = defaultSpeakerLabel(infoPanelSpeakerId);
+  speakerInfoName.textContent = profile.label || fallbackName;
+  speakerInfoRelation.textContent = profile.relation || "Not set";
+  speakerInfoDescription.textContent = profile.description || "No description yet.";
+  speakerInfoNameInput.value = profile.label || fallbackName;
+  speakerInfoRelationInput.value = profile.relation || "";
+  speakerInfoDescriptionInput.value = profile.description || "";
+}
+
+function renderLanguageOptions() {
+  renderLanguageList(spokenLanguageList, "spoken");
+  renderLanguageList(captionLanguageList, "caption");
+  updateTranslateLabels();
+}
+
+function renderLanguageList(list, type) {
+  list.replaceChildren();
+
+  for (const language of languages) {
+    const option = document.createElement("button");
+    option.type = "button";
+    option.className = "language-picker-option";
+    option.dataset.languageType = type;
+    option.dataset.languageCode = language.code;
+    option.textContent = language.label;
+    list.append(option);
+  }
+}
+
+function toggleTranslatePanel() {
+  const open = translatePanel.hidden;
+  translatePanel.hidden = !open;
+  translateButton.setAttribute("aria-expanded", String(open));
+  if (open) {
+    closeLanguageLists();
+  }
+}
+
+function closeTranslatePanel() {
+  translatePanel.hidden = true;
+  translateButton.setAttribute("aria-expanded", "false");
+  closeLanguageLists();
+}
+
+function toggleLanguageList(type) {
+  const list = type === "spoken" ? spokenLanguageList : captionLanguageList;
+  const button = type === "spoken" ? spokenLanguageButton : captionLanguageButton;
+  const open = list.hidden;
+
+  closeLanguageLists();
+  list.hidden = !open;
+  button.setAttribute("aria-expanded", String(open));
+}
+
+function closeLanguageLists() {
+  spokenLanguageList.hidden = true;
+  captionLanguageList.hidden = true;
+  spokenLanguageButton.setAttribute("aria-expanded", "false");
+  captionLanguageButton.setAttribute("aria-expanded", "false");
+}
+
+function selectLanguage(type, code) {
+  if (type === "spoken") {
+    spokenLanguageCode = code;
+  } else {
+    captionLanguageCode = code;
+  }
+
+  updateTranslateLabels();
+  closeLanguageLists();
+}
+
+function updateTranslateLabels() {
+  const spokenLanguage = findLanguage(spokenLanguageCode);
+  const captionLanguage = findLanguage(captionLanguageCode);
+  spokenLanguageButton.textContent = spokenLanguage.label;
+  captionLanguageButton.textContent = captionLanguage.label;
+  translateButton.textContent = `${spokenLanguage.short} -> ${captionLanguage.short}`;
+}
+
+function findLanguage(code) {
+  const language = languages.find((item) => item.code === code) ?? languages[0];
+  return {
+    ...language,
+    short: language.code.toUpperCase(),
+  };
+}
+
 function upsertProfile(profiles, profile) {
-  const existingIndex = profiles.findIndex((item) => item.id === profile.id);
+  const existingIndex = profiles.findIndex(
+    (item) =>
+      item.id === profile.id ||
+      normalizeProfileSources(item).some((source) =>
+        normalizeProfileSources(profile).includes(source),
+      ),
+  );
   if (existingIndex === -1) return [...profiles, profile];
 
   return profiles.map((item, index) =>
@@ -717,7 +1136,7 @@ function findVoiceMatch(speakerId) {
     secondBestDistance === Infinity ||
     secondBestDistance - bestDistance > 0.035;
 
-  return bestDistance < 0.075 && hasClearMargin ? bestMatch : null;
+  return bestDistance < 0.045 && hasClearMargin ? bestMatch : null;
 }
 
 function signatureDistance(left, right) {
@@ -743,13 +1162,19 @@ closeButton.addEventListener("click", () => {
   window.lumenWindow?.close();
 });
 
-speakerPromptButton.addEventListener("click", () => {
-  if (pendingMatchProfileId) {
-    void confirmMatchedSpeaker();
-    return;
-  }
+translateButton.addEventListener("click", toggleTranslatePanel);
+translatePanelClose.addEventListener("click", closeTranslatePanel);
+spokenLanguageButton.addEventListener("click", () => toggleLanguageList("spoken"));
+captionLanguageButton.addEventListener("click", () => toggleLanguageList("caption"));
+translatePanel.addEventListener("click", (event) => {
+  const option = event.target.closest(".language-picker-option");
+  if (!option) return;
 
-  openRenameForm();
+  selectLanguage(option.dataset.languageType, option.dataset.languageCode);
+});
+
+speakerPromptButton.addEventListener("click", () => {
+  openSpeakerInfoPanel(pendingSpeakerId);
 });
 
 speakerPromptForm.addEventListener("submit", (event) => {
@@ -763,6 +1188,22 @@ speakerLaterButton.addEventListener("click", () => {
     dismissedSpeakers.add(pendingSpeakerId);
   }
   hideSpeakerPrompt();
+});
+
+whoIsThisButton.addEventListener("click", () => {
+  openSpeakerInfoPanel(currentSpeakerId);
+});
+
+speakerInfoClose.addEventListener("click", closeSpeakerInfoPanel);
+speakerInfoForm.addEventListener("submit", (event) => {
+  void saveSpeakerInfo(event);
+});
+speakerProfilePickerButton.addEventListener("click", toggleSpeakerProfilePicker);
+speakerProfilePickerList.addEventListener("click", (event) => {
+  const option = event.target.closest(".speaker-profile-picker-option");
+  if (option) {
+    selectSpeakerProfile(option.dataset.profileId ?? "");
+  }
 });
 
 window.addEventListener("beforeunload", () => {
@@ -779,6 +1220,7 @@ window.addEventListener("beforeunload", () => {
 });
 
 startCamera();
+renderLanguageOptions();
 void refreshSpeakerProfiles();
 window.setInterval(refreshSpeakerProfiles, 2500);
 startDeepgramCaptions();

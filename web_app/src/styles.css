@@ -648,7 +648,6 @@ button.ghost {
   color: #d7ebe2;
 }
 
-.speaker-auth,
 .speaker-admin-actions {
   display: grid;
   grid-template-columns: 1fr auto;
@@ -656,7 +655,6 @@ button.ghost {
   margin-top: 14px;
 }
 
-.speaker-auth input,
 .speaker-profile-row input {
   min-width: 0;
   border: 1px solid var(--line);
@@ -667,10 +665,6 @@ button.ghost {
   padding: 0 12px;
 }
 
-.speaker-auth input {
-  min-height: 48px;
-}
-
 .speaker-profile-list {
   display: grid;
   gap: 10px;
@@ -679,7 +673,7 @@ button.ghost {
 
 .speaker-profile-row {
   display: grid;
-  grid-template-columns: 1fr auto auto;
+  grid-template-columns: 1fr 0.8fr 1.3fr auto auto;
   gap: 8px;
   align-items: center;
   border: 1px solid rgba(255, 255, 255, 0.08);
@@ -692,8 +686,36 @@ button.ghost {
   min-height: 42px;
 }
 
-.speaker-profile-row input:disabled {
-  opacity: 0.68;
+.speaker-assignment-card {
+  display: grid;
+  gap: 8px;
+  margin-top: 14px;
+  border: 1px solid rgba(255, 209, 139, 0.28);
+  border-radius: 16px;
+  padding: 12px;
+  background: rgba(255, 209, 139, 0.08);
+}
+
+.speaker-assignment-card p {
+  margin: 0;
+}
+
+.speaker-assignment-actions {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: center;
+}
+
+.speaker-assignment-actions select {
+  min-width: 0;
+  min-height: 42px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--text);
+  font: inherit;
+  padding: 0 12px;
 }
 
 .speaker-profile-row span {
@@ -793,7 +815,9 @@ button.ghost {
   .hero-metrics,
   .button-grid,
   .repair-actions,
-  .consent-grid {
+  .consent-grid,
+  .speaker-assignment-actions,
+  .speaker-profile-row {
     grid-template-columns: 1fr;
   }
 
