@@ -1,7 +1,10 @@
 # Lumen Deepgram Server
 
-Local WebSocket proxy for Lumen captions. It keeps the Deepgram API key out of
-the web app and Electron renderer.
+Local WebSocket proxy for Lumen captions. It uses the Deepgram API key from
+`.env` and keeps that key out of the web app and Electron renderer.
+
+Live audio is forwarded from the clients to this local server, then from this
+server to Deepgram for transcription. This is not offline-only captioning.
 
 The proxy enables Deepgram diarization so clients can receive session-local
 speaker IDs for rename prompts.

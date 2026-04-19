@@ -98,6 +98,7 @@ function App() {
   const [showDemoOptions, setShowDemoOptions] = useState(false);
   const [saved, setSaved] = useState(false);
   const [hearingPrompt, setHearingPrompt] = useState<string | null>(null);
+  const [typedMessage, setTypedMessage] = useState("");
   const [missedMoments, setMissedMoments] = useState<MissedMoment[]>([]);
   const [pendingMissedMomentId, setPendingMissedMomentId] = useState<string | null>(null);
   const [statusMessage, setStatusMessage] = useState(
@@ -120,7 +121,7 @@ function App() {
   const autoCreatedSpeakerProfilesRef = useRef<Record<string, SpeakerProfile>>({});
   const pendingMissedMomentIdRef = useRef<string | null>(null);
   const pendingMissedBeforeCaptionIdRef = useRef<string | null>(null);
-  const captionEndRef = useRef<HTMLDivElement>(null);
+  const captionStreamRef = useRef<HTMLDivElement>(null);
 
   const selectedScenario = useMemo(
     () => scenarios.find((scenario) => scenario.id === selectedScenarioId) ?? scenarios[0],
@@ -167,7 +168,10 @@ function App() {
   }, []);
 
   useEffect(() => {
-    captionEndRef.current?.scrollIntoView({ behavior: "auto" });
+    const captionStream = captionStreamRef.current;
+    if (!captionStream) return;
+
+    captionStream.scrollTop = captionStream.scrollHeight;
   }, [visibleCaptions]);
 
   useEffect(() => {
@@ -470,7 +474,20 @@ function App() {
 
   function showHearingPrompt(message: string) {
     setHearingPrompt(message);
+    setTypedMessage("");
     setStatusMessage(`Showing request: ${message}`);
+  }
+
+  function showTypedMessage() {
+    const message = sanitizeText(typedMessage.trim());
+    if (!message) {
+      setStatusMessage("Type a message before showing it.");
+      return;
+    }
+
+    setHearingPrompt(message);
+    setTypedMessage("");
+    setStatusMessage("Typed message is showing to the speaker.");
   }
 
   function markMissedMoment() {
@@ -845,12 +862,28 @@ function App() {
                     Please face me
                   </button>
                 </div>
+                <div className="typed-communication">
+                  <label htmlFor="typedMessageInput">Type to speaker</label>
+                  <div>
+                    <textarea
+                      id="typedMessageInput"
+                      value={typedMessage}
+                      onChange={(event) => setTypedMessage(event.currentTarget.value)}
+                      placeholder="Type what you want to say..."
+                      maxLength={500}
+                      rows={3}
+                    />
+                    <button type="button" onClick={showTypedMessage}>
+                      Show message
+                    </button>
+                  </div>
+                </div>
                 {pendingMissedMoment ? (
                   <div className="missed-status" aria-live="polite">
                     Waiting for the speaker to repeat the last part.
                   </div>
                 ) : null}
-                <div className="caption-stream">
+                <div className="caption-stream" ref={captionStreamRef}>
                   {visibleCaptions.length === 0 ? (
                     <div className="empty-state">
                       <strong>Nothing captured yet.</strong>
@@ -913,7 +946,6 @@ function App() {
                       </button>
                     ))
                   )}
-                  <div ref={captionEndRef} />
                 </div>
               </div>
             </div>
@@ -936,7 +968,7 @@ function App() {
                 ) : (
                   <>
                     <h3>I use live captions to understand speech.</h3>
-                    <p>Please speak normally and face me when you can. Audio is not secretly recorded; notes are only saved if I choose to save them.</p>
+                    <p>Audio is sent through my local caption server to Deepgram while captions are live. Notes are only saved if I choose to save them.</p>
                   </>
                 )}
                 <div className="consent-grid">

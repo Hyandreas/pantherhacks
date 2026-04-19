@@ -1,6 +1,6 @@
 # PantherHacks Lumen
 
-Lumen is a privacy-first accessibility assistant for live conversations. It
+Lumen is a local-proxy accessibility assistant for live conversations. It
 turns speech into captions, helps users recover missed moments, and keeps
 speaker identity useful across web and AR experiences.
 
@@ -12,8 +12,10 @@ speaker identity useful across web and AR experiences.
 - `deepgram_server/`: local WebSocket and HTTP proxy for Deepgram captions and
   shared speaker profiles.
 
-Live captions stream through the local proxy. The Deepgram API key stays in
-`deepgram_server/.env` and is never loaded by the web or Electron UI.
+Live captions use Deepgram. The Deepgram API key is required and is used by
+`deepgram_server`. The key is stored in `deepgram_server/.env` and is not loaded
+by the web or Electron UI. Live microphone audio is streamed from the client to
+the local proxy, then from the proxy to Deepgram for transcription.
 
 ## Core Features
 
@@ -62,6 +64,8 @@ Live captions stream through the local proxy. The Deepgram API key stays in
   - repeat the last part
   - repeat slowly
   - please face me
+- Typed communication box lets the user write a custom message and show it on
+  the hearing-side panel.
 
 ### Conversation Memory
 
@@ -113,10 +117,12 @@ Live captions stream through the local proxy. The Deepgram API key stays in
 
 ## Differentiators
 
-- Privacy-first local proxy: API keys stay out of browser and Electron client
-  code.
+- Local API-key isolation: the Deepgram API key is used by the local Node server
+  and kept out of browser and Electron client code.
 - Accessibility repair loop: Lumen does not only caption; it helps the user ask
   for clarification when captions are uncertain or missed.
+- Typed communication support: users can type custom messages to the speaker
+  when speaking aloud is not the best option.
 - Speaker-aware memory: profiles carry relationship and description context,
   not just raw speaker numbers.
 - AR-friendly interaction: pinch and hold gestures support hands-free use.
@@ -200,12 +206,17 @@ returns speech results.
 8. Confirm the web app reflects the same profile data.
 9. Use the translate pill to show spoken/caption language controls.
 10. Use `I missed that` in the web app to demonstrate repair flow.
+11. Type a custom message in the web app and show it to the speaker.
 
 ## Privacy And Security Notes
 
 - Do not commit `.env` files.
-- Do not paste API keys into client code.
-- Audio is streamed to Deepgram through the local proxy for captioning.
+- Do not paste API keys into web or Electron client code.
+- The Deepgram API key is used by `deepgram_server`.
+- Live audio is sent to Deepgram through the local proxy for captioning. This is
+  not an offline-only transcription system.
+- Translation may call MyMemory's public API unless `LIBRETRANSLATE_URL` points
+  to a service you control.
 - Speaker profiles are stored locally by `deepgram_server`.
 - Voice signatures are lightweight local profile metadata and should be treated
   as sensitive user data.
